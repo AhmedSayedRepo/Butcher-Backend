@@ -1,8 +1,0 @@
-{
-  "plugins": [
-    "postgres"
-  ],
-  "deploy": {
-    "start": "npm run start"
-  }
-}
