@@ -1,0 +1,5 @@
+{
+  "deploy": {
+    "start": "npm run start"
+  }
+}
