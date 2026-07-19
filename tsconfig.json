@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2021",
+    "target": "ES2024",
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "outDir": "dist",
@@ -10,12 +10,11 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": [
-      "ES2021"
+      "ES2024"
     ],
     "resolveJsonModule": true
   },
   "include": [
-    "src",
-    "prisma/**/*.ts"
+    "src"
   ]
 }

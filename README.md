@@ -38,3 +38,5 @@ The server starts on `http://localhost:${PORT:-8080}`.
 - `POST /api/parse-order` — parse free text like "2 kg beef, 1.5 kg lamb"
 
 All JSON. Auth via `Authorization: Bearer <token>`.
+
+See `../CONTRACT.md` for exact response shapes consumed by the frontend.

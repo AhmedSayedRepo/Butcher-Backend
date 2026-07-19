@@ -1,9 +1,15 @@
 import { Router } from 'express'
-import { prisma } from '../lib/db'
 import { z } from 'zod'
-import { auth, AuthRequest } from '../middleware/auth'
+import { prisma } from '../lib/db'
+import { auth } from '../middleware/auth'
+import type { AuthRequest } from '../middleware/auth'
+import { asyncHandler } from '../lib/asyncHandler'
+import { HTTP_STATUS } from '../lib/httpStatus'
 
 const router = Router()
+
+const MIN_ORDER_ITEMS = 1
+const INITIAL_TOTAL = 0
 
 const OrderItemSchema = z.object({
   productId: z.string().uuid(),
@@ -12,51 +18,81 @@ const OrderItemSchema = z.object({
 
 const CreateOrderSchema = z.object({
   customer: z.string().optional(),
-  items: z.array(OrderItemSchema).min(1)
+  items: z.array(OrderItemSchema).min(MIN_ORDER_ITEMS)
 })
 
-router.get('/', auth, async (_req, res) => {
+router.get('/', auth, asyncHandler(async (_req, res) => {
   const orders = await prisma.order.findMany({
     include: { items: true },
     orderBy: { createdAt: 'desc' }
   })
   res.json(orders)
-})
+}))
 
-router.post('/', auth, async (req: AuthRequest, res) => {
+router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
+  if (req.user === undefined) {
+    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    return
+  }
+  const { user } = req
+
   const parsed = CreateOrderSchema.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() })
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    return
+  }
 
-  const { customer, items } = parsed.data
+  const { data } = parsed
+  const { customer, items } = data
 
-  const productIds = items.map(i => i.productId)
+  const productIds = items.map((i) => i.productId)
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
-  const productMap = new Map(products.map(p => [p.id, p]))
+  const productMap = new Map(products.map((p) => [p.id, p]))
+
+  // Every item's productId is confirmed to exist in productMap by the
+  // validation loop below before this is ever called, so reaching the
+  // `undefined` branch here means an internal invariant was violated, not a
+  // client error — throwing (rather than a non-null assertion) lets
+  // asyncHandler forward it to the centralized error handler as a proper 500
+  // instead of silently continuing with bad data.
+  function getProduct(productId: string): (typeof products)[number] {
+    const p = productMap.get(productId)
+    if (p === undefined) {
+      throw new Error(`Product not found: ${productId}`)
+    }
+    return p
+  }
 
   for (const it of items) {
     const p = productMap.get(it.productId)
-    if (!p) return res.status(400).json({ error: `Product not found: ${it.productId}` })
+    if (p === undefined) {
+      res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Product not found: ${it.productId}` })
+      return
+    }
     if (Number(p.stockKg) < it.kg) {
-      return res.status(400).json({ error: `Insufficient stock for ${p.name}. Available: ${p.stockKg} kg` })
+      res.status(HTTP_STATUS.BAD_REQUEST).json({
+        error: `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`
+      })
+      return
     }
   }
 
   const total = items.reduce((sum, it) => {
-    const p = productMap.get(it.productId)!
+    const p = getProduct(it.productId)
     return sum + Number(p.pricePerKg) * it.kg
-  }, 0)
+  }, INITIAL_TOTAL)
 
   const order = await prisma.$transaction(async (tx) => {
     const created = await tx.order.create({
       data: {
         customer,
         totalAmount: total,
-        userId: (req.user as any).id
+        userId: user.id
       }
     })
 
-    for (const it of items) {
-      const p = productMap.get(it.productId)!
+    await Promise.all(items.map(async (it) => {
+      const p = getProduct(it.productId)
       await tx.orderItem.create({
         data: {
           orderId: created.id,
@@ -69,13 +105,13 @@ router.post('/', auth, async (req: AuthRequest, res) => {
         where: { id: it.productId },
         data: { stockKg: Number(p.stockKg) - it.kg }
       })
-    }
+    }))
 
     return created
   })
 
   const full = await prisma.order.findUnique({ where: { id: order.id }, include: { items: true } })
-  res.status(201).json(full)
-})
+  res.status(HTTP_STATUS.CREATED).json(full)
+}))
 
 export default router
