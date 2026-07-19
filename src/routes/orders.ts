@@ -1,10 +1,10 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/db'
-import { auth } from '../middleware/auth'
-import type { AuthRequest } from '../middleware/auth'
-import { asyncHandler } from '../lib/asyncHandler'
-import { HTTP_STATUS } from '../lib/httpStatus'
+import { prisma } from '../lib/db.js'
+import { auth } from '../middleware/auth.js'
+import type { AuthRequest } from '../middleware/auth.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { HTTP_STATUS } from '../lib/httpStatus.js'
 
 const router = Router()
 

@@ -1,13 +1,13 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import rateLimit from 'express-rate-limit'
-import { prisma } from '../lib/db'
+import { prisma } from '../lib/db.js'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import { AUTH_COOKIE_NAME, auth, requireEnv } from '../middleware/auth'
-import type { AuthRequest } from '../middleware/auth'
-import { asyncHandler } from '../lib/asyncHandler'
-import { HTTP_STATUS } from '../lib/httpStatus'
+import { AUTH_COOKIE_NAME, auth, requireEnv } from '../middleware/auth.js'
+import type { AuthRequest } from '../middleware/auth.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
+import { HTTP_STATUS } from '../lib/httpStatus.js'
 
 const router = Router()
 

@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { prisma } from '../lib/db'
-import { asyncHandler } from '../lib/asyncHandler'
+import { prisma } from '../lib/db.js'
+import { asyncHandler } from '../lib/asyncHandler.js'
 
 const router = Router()
 
