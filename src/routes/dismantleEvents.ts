@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import type { Prisma, DismantleEventOutput } from '@prisma/client'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
@@ -201,6 +202,56 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
   res.status(HTTP_STATUS.CREATED).json(withComputedFields(event))
 }))
 
+// v3.1 follow-up 13 lint fix: pulled out of the PATCH transaction below —
+// that arrow function's complexity (nested weight-changed / productId /
+// unchanged-value branches inline) tripped eslint-config-love's `complexity`
+// rule (18 > the max of 10). Same behavior, just named and testable on its
+// own: update the one output row, then reconcile its product's stock only
+// if the weight actually changed and it's stocked into a product.
+// `eventId`/`actorUserId` are bundled into one `ctx` object rather than two
+// more positional params — @typescript-eslint/max-params caps this at 4.
+interface ApplyOutputUpdateContext {
+  eventId: string
+  actorUserId: string
+}
+
+async function applyOutputUpdate(
+  tx: Prisma.TransactionClient,
+  before: DismantleEventOutput,
+  u: z.infer<typeof UpdateOutputSchema>,
+  ctx: ApplyOutputUpdateContext
+): Promise<void> {
+  const { eventId, actorUserId } = ctx
+
+  await tx.dismantleEventOutput.update({
+    where: { id: u.id },
+    data: {
+      ...(u.cutName !== undefined && { cutName: u.cutName }),
+      ...(u.actualWeightKg !== undefined && { actualWeightKg: u.actualWeightKg }),
+      ...(u.isOffal !== undefined && { isOffal: u.isOffal }),
+      ...(u.isByproduct !== undefined && { isByproduct: u.isByproduct })
+    }
+  })
+
+  if (u.actualWeightKg === undefined || before.productId === null) return
+  if (u.actualWeightKg === Number(before.actualWeightKg)) return
+
+  const { productId } = before
+  const deltaKg = u.actualWeightKg - Number(before.actualWeightKg)
+  await tx.product.update({
+    where: { id: productId },
+    data: { stockKg: { increment: deltaKg } }
+  })
+  await tx.stockAdjustment.create({
+    data: {
+      productId,
+      deltaKg,
+      reason: `Dismantle event ${eventId} edited: ${u.cutName ?? before.cutName} weight ${Number(before.actualWeightKg).toString()} → ${u.actualWeightKg.toString()} kg`,
+      userId: actorUserId
+    }
+  })
+}
+
 // v3.1 follow-up 13: same cap as recording one in the first place — a
 // manager/admin who's trusted to log a breakdown is trusted to correct it.
 router.patch('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest>(async (req, res) => {
@@ -242,43 +293,15 @@ router.patch('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthReq
       })
     }
 
+    const actorUserId = req.user?.id ?? existing.performedBy
+
     // Sequential for the same read-then-write race reason as the POST
     // handler above — two updated outputs could target the same product.
     /* eslint-disable no-await-in-loop -- see comment above */
     for (const u of outputUpdates ?? []) {
       const before = existingOutputById.get(u.id)
       if (before === undefined) continue
-
-      await tx.dismantleEventOutput.update({
-        where: { id: u.id },
-        data: {
-          ...(u.cutName !== undefined && { cutName: u.cutName }),
-          ...(u.actualWeightKg !== undefined && { actualWeightKg: u.actualWeightKg }),
-          ...(u.isOffal !== undefined && { isOffal: u.isOffal }),
-          ...(u.isByproduct !== undefined && { isByproduct: u.isByproduct })
-        }
-      })
-
-      if (
-        u.actualWeightKg !== undefined &&
-        before.productId !== null &&
-        u.actualWeightKg !== Number(before.actualWeightKg)
-      ) {
-        const { productId } = before
-        const deltaKg = u.actualWeightKg - Number(before.actualWeightKg)
-        await tx.product.update({
-          where: { id: productId },
-          data: { stockKg: { increment: deltaKg } }
-        })
-        await tx.stockAdjustment.create({
-          data: {
-            productId,
-            deltaKg,
-            reason: `Dismantle event ${id} edited: ${u.cutName ?? before.cutName} weight ${Number(before.actualWeightKg).toString()} → ${u.actualWeightKg.toString()} kg`,
-            userId: req.user?.id ?? existing.performedBy
-          }
-        })
-      }
+      await applyOutputUpdate(tx, before, u, { eventId: id, actorUserId })
     }
     /* eslint-enable no-await-in-loop */
 

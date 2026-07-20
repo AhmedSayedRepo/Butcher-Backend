@@ -1,3 +1,4 @@
+import dns from 'node:dns'
 import nodemailer from 'nodemailer'
 import { getOrCreateSettings } from './shopSettings.js'
 import { decryptSecret } from './encryption.js'
@@ -67,6 +68,34 @@ const SMTP_CONNECTION_TIMEOUT_MS = 10_000
 const SMTP_GREETING_TIMEOUT_MS = 10_000
 const SMTP_SOCKET_TIMEOUT_MS = 15_000
 
+const GMAIL_SMTP_HOST = 'smtp.gmail.com'
+const GMAIL_SMTP_PORT = 465
+const ZERO = 0
+
+// v3.1 follow-up 14: `dns.setDefaultResultOrder('ipv4first')` (index.ts,
+// v3.1 follow-up 12) turned out not to be the actual fix — it only affects
+// `dns.lookup()`, but nodemailer resolves its own host itself
+// (lib/shared/resolveHostname.js) via `dns.resolve4`/`dns.resolve6`
+// directly, bypassing that setting entirely. Worse: it then picks
+// *randomly* from the combined IPv4+IPv6 address list for every single
+// connection attempt (`formatDNSValue`'s `Math.random()`), not "IPv4 first"
+// despite what its own comment says — so roughly half of all send attempts
+// were always going to land on an IPv6 address Render can't route to,
+// matching the intermittent ENETUNREACH seen across two different Gmail
+// frontend IPs. Resolving to a concrete IPv4 address ourselves and handing
+// nodemailer that literal IP sidesteps its resolver entirely — nodemailer's
+// own resolveHostname short-circuits ("nothing to do here") whenever
+// `net.isIP(options.host)` is true. `tls.servername` keeps the TLS
+// handshake's SNI and certificate-hostname check pointed at the real
+// hostname, exactly as if we'd connected by name instead of by IP.
+async function resolveGmailSmtpIPv4(): Promise<string> {
+  const addresses = await dns.promises.resolve4(GMAIL_SMTP_HOST)
+  if (addresses.length === ZERO) {
+    throw new Error(`dns.resolve4 returned no addresses for ${GMAIL_SMTP_HOST}`)
+  }
+  return addresses[Math.floor(Math.random() * addresses.length)]
+}
+
 async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
   // v3.1 follow-up 10: the whole function is now one try/catch, not just
   // the transport/send part — `getSmtpCredentials()` awaits a DB call and
@@ -79,9 +108,24 @@ async function sendEmail(to: string, subject: string, html: string): Promise<boo
     if (credentials === null) return false
 
     const { user, pass } = credentials
+
+    // Best-effort: if this pre-resolution fails for some transient reason,
+    // fall back to the plain hostname and let nodemailer attempt its own
+    // (still IPv4-capable, just a coin flip) resolution rather than hard
+    // failing the whole send over one failed DNS call.
+    let host: string = GMAIL_SMTP_HOST
+    try {
+      host = await resolveGmailSmtpIPv4()
+    } catch (dnsErr) {
+      process.stderr.write(`resolveGmailSmtpIPv4 failed, falling back to hostname: ${getErrorMessage(dnsErr)}\n`)
+    }
+
     const transport = nodemailer.createTransport({
-      service: 'gmail',
+      host,
+      port: GMAIL_SMTP_PORT,
+      secure: true,
       auth: { user, pass },
+      tls: { servername: GMAIL_SMTP_HOST },
       connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
       greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
       socketTimeout: SMTP_SOCKET_TIMEOUT_MS
