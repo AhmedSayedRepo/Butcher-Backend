@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import dns from 'node:dns'
 import fs from 'node:fs'
 import path from 'node:path'
 import express from 'express'
@@ -23,6 +24,20 @@ import shopSettingsRouter from './routes/shopSettings.js'
 import { asyncHandler } from './lib/asyncHandler.js'
 import { HTTP_STATUS } from './lib/httpStatus.js'
 import { getErrorMessage } from './lib/errors.js'
+
+// v3.1 follow-up 12: Node 17+ changed dns.lookup()'s default result order
+// from "always IPv4 first" (verbatim: false) to "whatever the resolver
+// returned" (verbatim: true) — usually IPv6 first on a dual-stack DNS
+// answer. That's harmless on a host with real IPv6 egress, but Render
+// (like many PaaS/container platforms) only routes outbound traffic over
+// IPv4, so any outbound connection to a dual-stack host — Gmail's SMTP
+// servers, the WhatsApp/webhook APIs, etc. — fails immediately with
+// ENETUNREACH on the IPv6 address before ever trying IPv4. This is the
+// confirmed cause of admin-invite emails silently failing to send (log:
+// "sendEmail failed: connect ENETUNREACH 2607:f8b0:...") — not bad
+// credentials. Restoring IPv4-first resolution here, once, at boot, fixes
+// this for every outbound connection the process makes, not just email.
+dns.setDefaultResultOrder('ipv4first')
 
 const DEFAULT_PORT = 8080
 

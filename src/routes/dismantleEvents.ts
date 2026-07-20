@@ -38,6 +38,26 @@ const CreateEventSchema = z.object({
   outputs: z.array(OutputSchema).min(MIN_LABEL_LENGTH)
 })
 
+// v3.1 follow-up 13: edit/delete for dismantle events. Deliberately narrower
+// than create — an edit can change an existing output's weight/cutName/
+// flags, but can't add/remove outputs or move one to a different product.
+// Reassigning which Product an output stocks into would mean unwinding one
+// product's stock and applying another's, which needs its own careful
+// review; not needed for the "fix a typo'd weight" use case this is for.
+const UpdateOutputSchema = z.object({
+  id: z.string().uuid(),
+  cutName: z.string().min(MIN_LABEL_LENGTH).optional(),
+  actualWeightKg: z.number().positive().optional(),
+  isOffal: z.boolean().optional(),
+  isByproduct: z.boolean().optional()
+})
+
+const UpdateEventSchema = z.object({
+  sourceLabel: z.string().min(MIN_LABEL_LENGTH).optional(),
+  inputWeightKg: z.number().positive().optional(),
+  outputs: z.array(UpdateOutputSchema).optional()
+})
+
 // Computed on read, deliberately not stored — see the plan's
 // "Auto-calculated fields" section: recorded weights stay the single source
 // of truth, so correcting an output later doesn't leave a stale derived
@@ -179,6 +199,141 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
   })
 
   res.status(HTTP_STATUS.CREATED).json(withComputedFields(event))
+}))
+
+// v3.1 follow-up 13: same cap as recording one in the first place — a
+// manager/admin who's trusted to log a breakdown is trusted to correct it.
+router.patch('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest>(async (req, res) => {
+  const { params } = req
+  const { id } = params
+
+  const existing = await prisma.dismantleEvent.findUnique({ where: { id }, include: { outputs: true } })
+  if (existing === null) {
+    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Dismantle event not found' })
+    return
+  }
+
+  const parsed = UpdateEventSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    return
+  }
+  const { data } = parsed
+  const { sourceLabel, inputWeightKg, outputs: outputUpdates } = data
+
+  const existingOutputById = new Map(existing.outputs.map((o) => [o.id, o]))
+  if (outputUpdates !== undefined) {
+    for (const u of outputUpdates) {
+      if (!existingOutputById.has(u.id)) {
+        res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Output ${u.id} does not belong to this event` })
+        return
+      }
+    }
+  }
+
+  const event = await prisma.$transaction(async (tx) => {
+    if (sourceLabel !== undefined || inputWeightKg !== undefined) {
+      await tx.dismantleEvent.update({
+        where: { id },
+        data: {
+          ...(sourceLabel !== undefined && { sourceLabel }),
+          ...(inputWeightKg !== undefined && { inputWeightKg })
+        }
+      })
+    }
+
+    // Sequential for the same read-then-write race reason as the POST
+    // handler above — two updated outputs could target the same product.
+    /* eslint-disable no-await-in-loop -- see comment above */
+    for (const u of outputUpdates ?? []) {
+      const before = existingOutputById.get(u.id)
+      if (before === undefined) continue
+
+      await tx.dismantleEventOutput.update({
+        where: { id: u.id },
+        data: {
+          ...(u.cutName !== undefined && { cutName: u.cutName }),
+          ...(u.actualWeightKg !== undefined && { actualWeightKg: u.actualWeightKg }),
+          ...(u.isOffal !== undefined && { isOffal: u.isOffal }),
+          ...(u.isByproduct !== undefined && { isByproduct: u.isByproduct })
+        }
+      })
+
+      if (
+        u.actualWeightKg !== undefined &&
+        before.productId !== null &&
+        u.actualWeightKg !== Number(before.actualWeightKg)
+      ) {
+        const { productId } = before
+        const deltaKg = u.actualWeightKg - Number(before.actualWeightKg)
+        await tx.product.update({
+          where: { id: productId },
+          data: { stockKg: { increment: deltaKg } }
+        })
+        await tx.stockAdjustment.create({
+          data: {
+            productId,
+            deltaKg,
+            reason: `Dismantle event ${id} edited: ${u.cutName ?? before.cutName} weight ${Number(before.actualWeightKg).toString()} → ${u.actualWeightKg.toString()} kg`,
+            userId: req.user?.id ?? existing.performedBy
+          }
+        })
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+
+    return await tx.dismantleEvent.findUniqueOrThrow({
+      where: { id },
+      include: { outputs: true, template: true }
+    })
+  })
+
+  res.json(withComputedFields(event))
+}))
+
+router.delete('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest>(async (req, res) => {
+  const { params } = req
+  const { id } = params
+
+  const existing = await prisma.dismantleEvent.findUnique({ where: { id }, include: { outputs: true } })
+  if (existing === null) {
+    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Dismantle event not found' })
+    return
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Give back whatever stock this event contributed, same "reverse via a
+    // new ledger entry" pattern as cancelling an order (routes/orders.ts) —
+    // the original StockAdjustment from creation is never edited/deleted,
+    // this just appends the opposite entry. Can legitimately push a
+    // product's stockKg negative if some of it was already sold on — that's
+    // real information (this dismantle event's stock is gone but was
+    // recorded as available), not something to silently clamp away.
+    /* eslint-disable no-await-in-loop -- same same-product race reason as above */
+    for (const o of existing.outputs) {
+      if (o.productId === null) continue
+      const { productId } = o
+      const deltaKg = -Number(o.actualWeightKg)
+      await tx.product.update({
+        where: { id: productId },
+        data: { stockKg: { increment: deltaKg } }
+      })
+      await tx.stockAdjustment.create({
+        data: {
+          productId,
+          deltaKg,
+          reason: `Dismantle event ${id} deleted: reversing ${o.cutName} (${existing.sourceLabel})`,
+          userId: req.user?.id ?? existing.performedBy
+        }
+      })
+    }
+    /* eslint-enable no-await-in-loop */
+
+    await tx.dismantleEventOutput.deleteMany({ where: { eventId: id } })
+    await tx.dismantleEvent.delete({ where: { id } })
+  })
+
+  res.status(HTTP_STATUS.NO_CONTENT).send()
 }))
 
 export default router
