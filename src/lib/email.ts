@@ -54,13 +54,37 @@ async function getSmtpCredentials(): Promise<SmtpCredentials | null> {
   return { user, pass: envPass }
 }
 
-async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
-  const credentials = await getSmtpCredentials()
-  if (credentials === null) return false
+// v3.1 follow-up 10: nodemailer's own defaults (2 minutes for
+// connectionTimeout/socketTimeout) mean a blocked/unreachable SMTP
+// connection — e.g. a host whose network blocks outbound SMTP ports, a
+// known thing some PaaS platforms do by default to fight spam — makes the
+// whole invite/reset request (and the admin's browser, which is directly
+// awaiting it) appear to hang for up to two minutes before finally failing.
+// Shortened here so a real network problem fails fast and predictably
+// instead of looking "stuck."
+const SMTP_CONNECTION_TIMEOUT_MS = 10_000
+const SMTP_GREETING_TIMEOUT_MS = 10_000
+const SMTP_SOCKET_TIMEOUT_MS = 15_000
 
+async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
+  // v3.1 follow-up 10: the whole function is now one try/catch, not just
+  // the transport/send part — `getSmtpCredentials()` awaits a DB call and
+  // can throw on a genuine DB error, and that was previously uncaught here,
+  // meaning it could crash the *entire* invite/reset request (500) instead
+  // of degrading to "email didn't send, here's the link" like every other
+  // email failure already does.
   try {
+    const credentials = await getSmtpCredentials()
+    if (credentials === null) return false
+
     const { user, pass } = credentials
-    const transport = nodemailer.createTransport({ service: 'gmail', auth: { user, pass } })
+    const transport = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user, pass },
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS
+    })
     // v3.1 follow-up 5 (Settings page): the display name is admin-editable
     // from /settings (ShopSettings.mailSenderName). Gmail still requires
     // the envelope address itself to be the authenticated account (or a
