@@ -1,5 +1,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import bcrypt from 'bcryptjs'
+import crypto from 'node:crypto'
+import { PasswordResetTokenPurpose } from '@prisma/client'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
@@ -8,6 +11,9 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { ROLES, CAPS } from '../lib/caps.js'
 import type { Role } from '../lib/caps.js'
+import { createPasswordResetToken } from '../lib/passwordResetToken.js'
+import { sendInviteEmail } from '../lib/email.js'
+import { frontendUrl } from '../lib/frontendUrl.js'
 
 const router = Router()
 
@@ -21,10 +27,55 @@ router.use(auth, requireRole('admin'))
 
 router.get('/', asyncHandler(async (_req, res) => {
   const users = await prisma.user.findMany({
-    select: { id: true, email: true, role: true, caps: true, createdAt: true, updatedAt: true },
+    select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true },
     orderBy: { createdAt: 'asc' }
   })
   res.json(users)
+}))
+
+const InviteUserSchema = z.object({
+  email: z.string().email(),
+  role: z.enum(ROLES).default('cashier')
+})
+
+// v3 follow-up: the only way to create a new user account, per the
+// "admin invites, user sets password" decision — there is no public
+// self-signup route anywhere in this app. Creates the row with an
+// unusable random password hash (same pattern as the WhatsApp system user
+// in prisma/seed.ts) and `passwordSet: false`, generates a single-use
+// invite token, and emails a "set your password" link. Also returns the
+// link directly in the response — unlike the self-service forgot-password
+// flow (which must never do this, or anyone could hijack any account by
+// email address alone), this is safe here because only an already-
+// authenticated admin ever sees this response, and it doubles as a manual
+// fallback for sharing the link (WhatsApp, in person, etc.) before
+// RESEND_API_KEY is configured or if the send fails.
+router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
+  const parsed = InviteUserSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    return
+  }
+  const { data } = parsed
+  const { email, role } = data
+
+  const existing = await prisma.user.findUnique({ where: { email } })
+  if (existing !== null) {
+    res.status(HTTP_STATUS.CONFLICT).json({ error: 'A user with that email already exists' })
+    return
+  }
+
+  const unusablePassword = await bcrypt.hash(crypto.randomUUID(), 10)
+  const user = await prisma.user.create({
+    data: { email, password: unusablePassword, role, passwordSet: false },
+    select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true }
+  })
+
+  const token = await createPasswordResetToken(user.id, PasswordResetTokenPurpose.INVITE)
+  const setPasswordUrl = `${frontendUrl()}/set-password?token=${token}`
+  const emailSent = await sendInviteEmail(email, setPasswordUrl, role)
+
+  res.status(HTTP_STATUS.CREATED).json({ user, setPasswordUrl, emailSent })
 }))
 
 const UpdateUserSchema = z.object({
@@ -89,7 +140,7 @@ router.patch('/:id', asyncHandler<AuthRequest>(async (req, res) => {
       ...(role === undefined ? {} : { role }),
       ...(caps === undefined ? {} : { caps })
     },
-    select: { id: true, email: true, role: true, caps: true, createdAt: true, updatedAt: true }
+    select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true }
   })
   res.json(updated)
 }))

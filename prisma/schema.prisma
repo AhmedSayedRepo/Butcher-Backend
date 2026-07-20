@@ -19,14 +19,46 @@ model User {
   // beyond whatever `role` implies) so this is a no-op for the existing
   // single admin user until Phase D assigns real values.
   caps      Json     @default("[]")
+  // v3 follow-up (admin-invite auth flow): false for an account an admin
+  // just invited by email — it's created with an unusable random password
+  // hash (same pattern as the WhatsApp system user in seed.ts) until the
+  // invitee follows their emailed link and sets a real one via
+  // POST /auth/reset-password. Defaults true so every pre-existing user
+  // (and the seeded admin) is unaffected. Purely a UI/status flag — actual
+  // login is gated by whether the stored hash matches, not this field.
+  passwordSet Boolean @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orders            Order[]
-  statusEvents      OrderStatusEvent[]
-  stockAdjustments  StockAdjustment[]
-  dismantleEvents   DismantleEvent[]
-  cashTransactions  CashTransaction[]
+  orders              Order[]
+  statusEvents        OrderStatusEvent[]
+  stockAdjustments    StockAdjustment[]
+  dismantleEvents     DismantleEvent[]
+  cashTransactions    CashTransaction[]
+  passwordResetTokens PasswordResetToken[]
+}
+
+// v3 follow-up: backs both the admin-invite "set your password" flow and
+// self-service "forgot password" — same mechanism either way (a
+// single-use, expiring, random token mailed to the account's email
+// address), so one model covers both rather than two near-duplicate ones.
+// `purpose` only changes the email copy/link label, not the validation
+// logic, which is identical for both cases.
+enum PasswordResetTokenPurpose {
+  INVITE
+  RESET
+}
+
+model PasswordResetToken {
+  id        String                    @id @default(uuid())
+  userId    String
+  token     String                    @unique
+  purpose   PasswordResetTokenPurpose
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime                  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
 }
 
 // v3 replan (Phase H — CRM). Deliberately minimal (ADR-013 / "Customer data
@@ -39,6 +71,13 @@ model Customer {
   id        String   @id @default(uuid())
   name      String
   phone     String?
+  // v3 follow-up: requested alongside `notes` (which already existed but had
+  // no create/edit UI wired up until now — only the backend accepted it).
+  // Useful for delivery-order customers even though `Order.deliveryAddress`
+  // is captured per-order too (a customer's usual address vs. a one-off
+  // delivery destination for a specific order are legitimately different —
+  // this doesn't replace that field, it just saves re-typing the common case).
+  address   String?  @db.Text
   notes     String?  @db.Text
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -4,11 +4,15 @@ import rateLimit from 'express-rate-limit'
 import { prisma } from '../lib/db.js'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import { PasswordResetTokenPurpose } from '@prisma/client'
 import { AUTH_COOKIE_NAME, auth, requireEnv } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { effectiveCaps } from '../lib/caps.js'
+import { createPasswordResetToken, findValidToken, invalidateOtherTokens } from '../lib/passwordResetToken.js'
+import { sendPasswordResetEmail } from '../lib/email.js'
+import { frontendUrl } from '../lib/frontendUrl.js'
 
 const router = Router()
 
@@ -127,6 +131,88 @@ router.get('/me', auth, asyncHandler<AuthRequest>(async (req, res) => {
     return
   }
   res.json({ ...req.user, role: current.role, caps: effectiveCaps(current.role, current.caps) })
+}))
+
+// v3 follow-up: self-service password reset. Same rate-limiting reasoning
+// as loginLimiter above — this endpoint accepts arbitrary emails from
+// anyone, so it needs its own throttle independent of the login one.
+const FORGOT_PASSWORD_WINDOW_MINUTES = 15
+const FORGOT_PASSWORD_MAX_ATTEMPTS_PER_WINDOW = 5
+const forgotPasswordLimiter = rateLimit({
+  windowMs: FORGOT_PASSWORD_WINDOW_MINUTES * SECONDS_PER_MINUTE * MILLISECONDS_PER_SECOND,
+  limit: FORGOT_PASSWORD_MAX_ATTEMPTS_PER_WINDOW,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' }
+})
+
+const ForgotPasswordSchema = z.object({ email: z.string().email() })
+
+// Deliberately always responds 200 with the same body whether or not the
+// email matches a real account — a different response (404 vs 200) would
+// let anyone enumerate which emails have accounts, just by trying
+// "forgot password" against a list of guesses.
+router.post('/forgot-password', forgotPasswordLimiter, asyncHandler(async (req, res) => {
+  const parsed = ForgotPasswordSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    return
+  }
+  const { data } = parsed
+  const { email } = data
+
+  const user = await prisma.user.findUnique({ where: { email } })
+  if (user !== null) {
+    const token = await createPasswordResetToken(user.id, PasswordResetTokenPurpose.RESET)
+    const resetUrl = `${frontendUrl()}/set-password?token=${token}`
+    void sendPasswordResetEmail(email, resetUrl)
+  }
+
+  res.status(HTTP_STATUS.OK).json({ ok: true })
+}))
+
+// Lets the frontend show "this link is invalid/expired" before the user
+// even types a new password, rather than only finding out on submit.
+router.get('/reset-token/:token', asyncHandler(async (req, res) => {
+  const { params } = req
+  const { token } = params
+  const record = await findValidToken(token)
+  res.json({ valid: record !== null, email: record?.user.email ?? null })
+}))
+
+const MIN_PASSWORD_LENGTH = 8
+
+const ResetPasswordSchema = z.object({
+  token: z.string().min(MIN_FIELD_LENGTH),
+  password: z.string().min(MIN_PASSWORD_LENGTH)
+})
+
+// Handles both the admin-invite "set your password" flow and self-service
+// "forgot password" — identical validation either way (see
+// lib/passwordResetToken.ts), only the emailed copy differs.
+router.post('/reset-password', asyncHandler(async (req, res) => {
+  const parsed = ResetPasswordSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    return
+  }
+  const { data } = parsed
+  const { token, password } = data
+
+  const record = await findValidToken(token)
+  if (record === null) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This link is invalid or has expired. Request a new one.' })
+    return
+  }
+
+  const hash = await bcrypt.hash(password, 10)
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({ where: { id: record.userId }, data: { password: hash, passwordSet: true } })
+    await tx.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } })
+  })
+  await invalidateOtherTokens(record.userId, record.id)
+
+  res.status(HTTP_STATUS.OK).json({ ok: true })
 }))
 
 export default router

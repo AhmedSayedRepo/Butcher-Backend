@@ -66,6 +66,9 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
 const CustomerSchema = z.object({
   name: z.string().min(MIN_NAME_LENGTH),
   phone: z.string().min(MIN_NAME_LENGTH).optional(),
+  // v3 follow-up: address added alongside notes (notes already existed on
+  // the model and API — it just had no create/edit UI until now).
+  address: z.string().optional(),
   notes: z.string().optional()
 })
 
