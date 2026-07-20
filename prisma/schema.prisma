@@ -133,6 +133,19 @@ model ShopSettings {
   // SMTP_USER, only the name is configurable.
   defaultLowStockThresholdKg Decimal @default(5) @db.Decimal(10, 3)
   mailSenderName             String  @default("Butcher Cashier")
+  // v3.1 follow-up 9 (ADR-016). SMTP_USER/SMTP_APP_PASSWORD were previously
+  // env-var-only (set on Render, no redeploy needed but a separate login
+  // from the app). Now editable from /settings instead: `smtpUser` is
+  // plaintext (it's just an email address, not a secret — it's visible in
+  // every outgoing message's From header anyway). `smtpAppPasswordEncrypted`
+  // is the Gmail app password, but NEVER stored raw — always AES-256-GCM
+  // ciphertext via lib/encryption.ts, keyed by the SETTINGS_ENCRYPTION_KEY
+  // env var (which itself never leaves env vars). Both are nullable and
+  // fall back to the original SMTP_USER/SMTP_APP_PASSWORD env vars when
+  // unset, so an existing env-var-only deployment keeps working unchanged
+  // until someone actually fills in /settings.
+  smtpUser                  String?
+  smtpAppPasswordEncrypted  String?
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction

@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer'
-import type { Transporter } from 'nodemailer'
 import { getOrCreateSettings } from './shopSettings.js'
+import { decryptSecret } from './encryption.js'
 
 // v3 follow-up: transactional email for the admin-invite / password-reset
 // auth flow. Same "opt-in, fire-and-forget where it can be" shape as
@@ -19,34 +19,53 @@ import { getOrCreateSettings } from './shopSettings.js'
 // (subject to Gmail's own ~500/day sending cap, far more than a small
 // shop's invite volume). Requires a Google Account with 2-Step
 // Verification enabled and an "app password" generated for it — see
-// .env.example for the exact steps. The transporter is built once and
-// cached (not on every call) since constructing it is pure config (no
-// network I/O — nodemailer only connects when `sendMail` is actually
-// called), so rebuilding it per-email would be pointless work.
-let transporter: Transporter | null = null
+// .env.example for the exact steps.
+//
+// v3.1 follow-up 9 (ADR-016): the Gmail address/app password can now also
+// be set from /settings (ShopSettings.smtpUser/smtpAppPasswordEncrypted)
+// instead of only env vars, so an admin can rotate them without touching
+// Render. DB values win when present; SMTP_USER/SMTP_APP_PASSWORD env vars
+// remain the fallback for a deployment that hasn't configured this yet.
+// Because credentials can now change at runtime (not just at process
+// start), the transporter is no longer cached as a module-level singleton
+// — it's rebuilt on every call instead. That's cheap: constructing a
+// nodemailer transport is pure config, no network I/O (it only connects
+// when `sendMail` is actually called), so this costs nothing real and
+// guarantees a settings change takes effect on the very next email.
+interface SmtpCredentials { user: string, pass: string }
 
-function getTransporter(): Transporter | null {
+async function getSmtpCredentials(): Promise<SmtpCredentials | null> {
   const { env } = process
-  const { SMTP_USER: user, SMTP_APP_PASSWORD: pass } = env
-  if (user === undefined || user === '' || pass === undefined || pass === '') return null
-  transporter ??= nodemailer.createTransport({ service: 'gmail', auth: { user, pass } })
-  return transporter
+  const { SMTP_USER: envUser, SMTP_APP_PASSWORD: envPass } = env
+  const settings = await getOrCreateSettings()
+
+  const user = (settings.smtpUser !== null && settings.smtpUser !== '') ? settings.smtpUser : envUser
+  if (user === undefined || user === '') return null
+
+  if (settings.smtpAppPasswordEncrypted !== null && settings.smtpAppPasswordEncrypted !== '') {
+    try {
+      return { user, pass: decryptSecret(settings.smtpAppPasswordEncrypted) }
+    } catch {
+      // Malformed ciphertext or SETTINGS_ENCRYPTION_KEY missing/changed —
+      // fall through to the env var rather than hard-failing every email.
+    }
+  }
+  if (envPass === undefined || envPass === '') return null
+  return { user, pass: envPass }
 }
 
 async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
-  const { env } = process
-  const { SMTP_USER: user } = env
-  const transport = getTransporter()
-  if (transport === null || user === undefined || user === '') return false
+  const credentials = await getSmtpCredentials()
+  if (credentials === null) return false
 
   try {
-    // v3.1 follow-up 5 (Settings page): the display name is now
-    // configurable from /settings (ShopSettings.mailSenderName) instead of
-    // an env var, so it's admin-editable without a Render redeploy. Gmail
-    // still requires the envelope address itself to be the authenticated
-    // account (or a verified "send as" alias) — silently rewrites or
-    // rejects anything else — so only the name is configurable, never the
-    // address.
+    const { user, pass } = credentials
+    const transport = nodemailer.createTransport({ service: 'gmail', auth: { user, pass } })
+    // v3.1 follow-up 5 (Settings page): the display name is admin-editable
+    // from /settings (ShopSettings.mailSenderName). Gmail still requires
+    // the envelope address itself to be the authenticated account (or a
+    // verified "send as" alias) — silently rewrites or rejects anything
+    // else — so only the name is configurable, never the address.
     const settings = await getOrCreateSettings()
     const displayFrom = `${settings.mailSenderName} <${user}>`
     await transport.sendMail({ from: displayFrom, to, subject, html })
