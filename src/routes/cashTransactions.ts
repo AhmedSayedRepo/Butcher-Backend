@@ -7,7 +7,7 @@ import type { AuthRequest } from '../middleware/auth.js'
 import { requireCap } from '../middleware/rbac.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
-import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom } from '../lib/idempotency.js'
+import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom, toIdempotentJson } from '../lib/idempotency.js'
 
 const router = Router()
 
@@ -74,18 +74,23 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
     data: { ...data, userId: user.id }
   })
 
-  await storeIdempotentResponse(IDEMPOTENCY_ENDPOINT, idempotencyKey, JSON.parse(JSON.stringify(transaction)))
+  await storeIdempotentResponse(IDEMPOTENCY_ENDPOINT, idempotencyKey, toIdempotentJson(transaction))
   res.status(HTTP_STATUS.CREATED).json(transaction)
 }))
 
-const RANGE_TO_DAYS: Record<string, number> = { day: 1, week: 7, month: 30, year: 365 }
-const DEFAULT_RANGE_DAYS = 7
+const DAY_RANGE_DAYS = 1
+const WEEK_RANGE_DAYS = 7
+const MONTH_RANGE_DAYS = 30
+const YEAR_RANGE_DAYS = 365
+const RANGE_TO_DAYS: Record<string, number> = { day: DAY_RANGE_DAYS, week: WEEK_RANGE_DAYS, month: MONTH_RANGE_DAYS, year: YEAR_RANGE_DAYS }
+const DEFAULT_RANGE_DAYS = WEEK_RANGE_DAYS
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
 const MINUTES_PER_HOUR = 60
 const HOURS_PER_DAY = 24
 const MS_PER_DAY = MS_PER_SECOND * SECONDS_PER_MINUTE * MINUTES_PER_HOUR * HOURS_PER_DAY
 const ZERO = 0
+const CURRENCY_DECIMALS = 2
 
 // v3 replan (Phase K reporting screen). Keeps cash position (this ledger)
 // and total revenue (Order.totalAmount) as two separate, never-merged
@@ -118,10 +123,10 @@ router.get('/summary', asyncHandler(async (req, res) => {
   const totalRevenue = orders.reduce((sum, o) => sum + Number(o.totalAmount), ZERO)
 
   res.json({
-    cashIn: cashIn.toFixed(2),
-    cashOut: cashOut.toFixed(2),
-    netPosition: (cashIn - cashOut).toFixed(2),
-    totalRevenue: totalRevenue.toFixed(2)
+    cashIn: cashIn.toFixed(CURRENCY_DECIMALS),
+    cashOut: cashOut.toFixed(CURRENCY_DECIMALS),
+    netPosition: (cashIn - cashOut).toFixed(CURRENCY_DECIMALS),
+    totalRevenue: totalRevenue.toFixed(CURRENCY_DECIMALS)
   })
 }))
 

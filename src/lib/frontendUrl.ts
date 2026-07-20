@@ -9,6 +9,10 @@ export function frontendUrl(): string {
   const { env } = process
   const { FRONTEND_URL: url, CORS_ORIGIN: corsOrigin } = env
   if (url !== undefined && url !== '') return url
+  // `''.split(',')` still returns `['']`, never `[]` — `firstOrigin` is
+  // always a string here, never `undefined`, so only the empty-string case
+  // needs checking (an explicit `!== undefined` alongside it is what
+  // @typescript-eslint/no-unnecessary-condition was flagging).
   const [firstOrigin] = (corsOrigin ?? '').split(',')
-  return firstOrigin !== undefined && firstOrigin !== '' ? firstOrigin : 'http://localhost:3000'
+  return firstOrigin === '' ? 'http://localhost:3000' : firstOrigin
 }

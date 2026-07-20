@@ -36,6 +36,7 @@ model User {
   dismantleEvents     DismantleEvent[]
   cashTransactions    CashTransaction[]
   passwordResetTokens PasswordResetToken[]
+  dailyClosings       DailyClosing[]
 }
 
 // v3 follow-up: backs both the admin-invite "set your password" flow and
@@ -113,6 +114,14 @@ model ShopSettings {
   id                      String  @id @default(uuid())
   pendingOrderAlertMinutes Int    @default(30)
   alertSoundEnabled       Boolean @default(true)
+  // v3.1 replan (Phase L — daily order numbering + closing day, ADR-015).
+  // Running counter behind Order.dailyNumber, incremented atomically
+  // (lib/dailyOrderNumber.ts) on every order/draft creation. Reset to 0 by
+  // POST /api/shop-settings/close-day (the "closing day" button in Cash
+  // Management) so tomorrow's first order is #1 again. `lastClosedAt` is
+  // the boundary the next closing's summary is computed from.
+  dailyOrderCounter       Int      @default(0)
+  lastClosedAt            DateTime?
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction
@@ -169,6 +178,13 @@ enum OrderStatus {
 
 model Order {
   id          String      @id @default(uuid())
+  // v3.1 replan (Phase L — daily order numbering, ADR-015). Human-friendly
+  // "#N" sequence shown in the UI/receipts/notifications, assigned
+  // atomically at creation time (lib/dailyOrderNumber.ts) and reset to 0 by
+  // the closing-day action — never the real key for anything (that stays
+  // `id`, the uuid, everywhere: FKs, the API, idempotency lookups). Nullable
+  // so every pre-migration order row stays valid with no backfill.
+  dailyNumber Int?
   customer    String?
   totalAmount Decimal     @db.Decimal(10,2)
   status      OrderStatus @default(CREATED)
@@ -284,6 +300,26 @@ model DismantleEvent {
   template DismantleTemplate     @relation(fields: [templateId], references: [id])
   user     User                  @relation(fields: [performedBy], references: [id])
   outputs  DismantleEventOutput[]
+}
+
+// v3.1 replan (Phase L — closing day, ADR-015). One row per "closing day"
+// action — an audit trail / point-in-time snapshot, consistent with this
+// app's append-only-ledger pattern elsewhere (StockAdjustment/
+// OrderStatusEvent/CashTransaction are never edited or deleted, only
+// appended to). Doesn't replace CashTransaction's own history; this is a
+// rollup taken at the moment ShopSettings.dailyOrderCounter resets to 0, so
+// past days/shifts stay reviewable after the counter moves on.
+model DailyClosing {
+  id           String   @id @default(uuid())
+  closedAt     DateTime @default(now())
+  closedBy     String
+  orderCount   Int
+  totalRevenue Decimal  @db.Decimal(10,2)
+  cashIn       Decimal  @db.Decimal(10,2)
+  cashOut      Decimal  @db.Decimal(10,2)
+  netPosition  Decimal  @db.Decimal(10,2)
+
+  closedByUser User @relation(fields: [closedBy], references: [id])
 }
 
 model DismantleEventOutput {

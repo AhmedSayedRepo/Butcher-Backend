@@ -11,7 +11,7 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { ROLES, CAPS } from '../lib/caps.js'
 import type { Role } from '../lib/caps.js'
-import { createPasswordResetToken } from '../lib/passwordResetToken.js'
+import { createPasswordResetToken, invalidateOtherTokens } from '../lib/passwordResetToken.js'
 import { sendInviteEmail } from '../lib/email.js'
 import { frontendUrl } from '../lib/frontendUrl.js'
 
@@ -38,6 +38,8 @@ const InviteUserSchema = z.object({
   role: z.enum(ROLES).default('cashier')
 })
 
+const BCRYPT_SALT_ROUNDS = 10
+
 // v3 follow-up: the only way to create a new user account, per the
 // "admin invites, user sets password" decision — there is no public
 // self-signup route anywhere in this app. Creates the row with an
@@ -60,22 +62,46 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
   const { email, role } = data
 
   const existing = await prisma.user.findUnique({ where: { email } })
-  if (existing !== null) {
+
+  // v3.1 bug fix: an account that already completed signup (a real,
+  // active user) is a genuine conflict — block it as before. But an
+  // account that's still `passwordSet: false` (invited, never activated)
+  // previously hit this exact same 409 on any retry, which is a dead end:
+  // the common reason an admin retries is that the *first* invite's email
+  // failed to send (e.g. Resend's sandbox `onboarding@resend.dev` address
+  // can only deliver to the Resend account's own email, not an arbitrary
+  // invitee — see backend/.env.example) and they never got a working link.
+  // Treat this case as "resend the invite" instead: issue a fresh token
+  // (invalidating any old ones), let the role be updated too since the
+  // account was never actually activated, and try sending again.
+  if (existing?.passwordSet === true) {
     res.status(HTTP_STATUS.CONFLICT).json({ error: 'A user with that email already exists' })
     return
   }
 
-  const unusablePassword = await bcrypt.hash(crypto.randomUUID(), 10)
-  const user = await prisma.user.create({
-    data: { email, password: unusablePassword, role, passwordSet: false },
-    select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true }
-  })
+  const user = existing === null
+    ? await prisma.user.create({
+        data: { email, password: await bcrypt.hash(crypto.randomUUID(), BCRYPT_SALT_ROUNDS), role, passwordSet: false },
+        select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true }
+      })
+    : await prisma.user.update({
+        where: { id: existing.id },
+        data: { role },
+        select: { id: true, email: true, role: true, caps: true, passwordSet: true, createdAt: true, updatedAt: true }
+      })
 
+  if (existing !== null) {
+    // Kill every still-outstanding token from the earlier attempt(s) first
+    // — an empty exceptTokenId matches no real row, so this invalidates
+    // all of them, not "all but one" — before minting the fresh one below,
+    // so only the newest link is ever valid.
+    await invalidateOtherTokens(user.id, '')
+  }
   const token = await createPasswordResetToken(user.id, PasswordResetTokenPurpose.INVITE)
   const setPasswordUrl = `${frontendUrl()}/set-password?token=${token}`
   const emailSent = await sendInviteEmail(email, setPasswordUrl, role)
 
-  res.status(HTTP_STATUS.CREATED).json({ user, setPasswordUrl, emailSent })
+  res.status(existing === null ? HTTP_STATUS.CREATED : HTTP_STATUS.OK).json({ user, setPasswordUrl, emailSent })
 }))
 
 const UpdateUserSchema = z.object({

@@ -10,9 +10,17 @@
 // slow must never fail the request that triggered it (creating an order,
 // editing stock). `void` marks the intentionally-unawaited call at each
 // call site so @typescript-eslint/no-floating-promises doesn't flag it.
+// v3.1 follow-up: `order.created` and `order.status_changed` previously
+// carried very different fields (status_changed had no customer/totalAmount
+// at all), which is why a single generic email template rendered blank
+// "Customer:"/"Total amount:"/"Product: ()" lines for status-change
+// notifications — those fields simply didn't exist in that event's payload.
+// Both order events now carry the same core order data (customer,
+// totalAmount, orderNumber, items); only the fields specific to *why* the
+// event fired differ between them.
 export type WebhookEvent =
-  | { type: 'order.created', orderId: string, customer: string | null, totalAmount: string }
-  | { type: 'order.status_changed', orderId: string, status: string, previousStatus: string }
+  | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ name: string, kg: string }> }
+  | { type: 'order.status_changed', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ name: string, kg: string }>, status: string, previousStatus: string }
   | { type: 'product.low_stock', productId: string, name: string, stockKg: string, thresholdKg: string }
 
 export async function fireWebhook(event: WebhookEvent): Promise<void> {

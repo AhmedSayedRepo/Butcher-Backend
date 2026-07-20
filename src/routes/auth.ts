@@ -181,6 +181,7 @@ router.get('/reset-token/:token', asyncHandler(async (req, res) => {
 }))
 
 const MIN_PASSWORD_LENGTH = 8
+const BCRYPT_SALT_ROUNDS = 10
 
 const ResetPasswordSchema = z.object({
   token: z.string().min(MIN_FIELD_LENGTH),
@@ -205,7 +206,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
     return
   }
 
-  const hash = await bcrypt.hash(password, 10)
+  const hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS)
   await prisma.$transaction(async (tx) => {
     await tx.user.update({ where: { id: record.userId }, data: { password: hash, passwordSet: true } })
     await tx.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } })

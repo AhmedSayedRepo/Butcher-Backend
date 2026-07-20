@@ -9,7 +9,8 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
-import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom } from '../lib/idempotency.js'
+import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom, toIdempotentJson } from '../lib/idempotency.js'
+import { nextDailyOrderNumber } from '../lib/dailyOrderNumber.js'
 
 const router = Router()
 
@@ -31,7 +32,21 @@ const SOURCE_VALUES = ['cashier', 'whatsapp', 'in_premise', 'social', 'phone'] a
 // the *same* prisma.$transaction as the order write per the plan's
 // transactional-integrity rule, so the order and the cash-ledger entry
 // always succeed or fail together.
-const SALE_CATEGORY = 'sale'
+//
+// v3.1 follow-up: category now embeds the order's channel/source
+// ("sale (in_premise)", "sale (whatsapp)"...) instead of a flat "sale" for
+// every order, so the cash ledger table itself shows where the money came
+// from without opening each order individually.
+function saleCategory(source: string): string {
+  return `sale (${source})`
+}
+
+// v3.1 follow-up: cancelling an order previously left its stock decrement
+// and auto-logged cash-in entry in place forever — cancelling never "gave
+// back" the ingredients or reversed the sale. Fixed in PATCH /:id/status
+// below. The reversal is a new OUT entry, never an edit/delete of the
+// original IN row, per ADR-011's append-only-ledger rule.
+const SALE_REVERSAL_CATEGORY = 'sale_reversal (cancelled)'
 
 // `status as OrderStatus` was an unsafe assertion — `x in EnumObject` narrows
 // membership but not to the enum's own type. This is a real runtime type
@@ -131,6 +146,12 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
 
   const { data } = parsed
   const { customer, customerId, customerMessage, deliveryAddress, paymentMethod, source, items } = data
+  // The zod schema leaves `source` optional; the DB column defaults it to
+  // "cashier" for us, but the cash-ledger category string is built in JS
+  // before that default is visible on any object we hold, so resolve it
+  // here too — same value either way.
+  const DEFAULT_SOURCE = 'cashier'
+  const resolvedSource = source ?? DEFAULT_SOURCE
 
   const productIds = items.map((i) => i.productId)
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
@@ -170,6 +191,12 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
   }, INITIAL_TOTAL)
 
   const order = await prisma.$transaction(async (tx) => {
+    // v3.1 replan (Phase L — daily order numbering, ADR-015): a
+    // human-friendly "#N" sequence, reset by the closing-day action, sits
+    // alongside the real uuid `id` (still the FK/primary key everywhere) —
+    // assigned atomically inside this same transaction so two concurrent
+    // submits can never collide on the same number.
+    const dailyNumber = await nextDailyOrderNumber(tx)
     const created = await tx.order.create({
       data: {
         customer,
@@ -178,6 +205,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
         deliveryAddress,
         paymentMethod,
         source,
+        dailyNumber,
         totalAmount: total,
         userId: user.id
       }
@@ -212,7 +240,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
     // separate follow-up call that could fail independently.
     if (paymentMethod === 'cash') {
       await tx.cashTransaction.create({
-        data: { type: CashTransactionType.IN, category: SALE_CATEGORY, amount: total, userId: user.id, note: `Order ${created.id}` }
+        data: { type: CashTransactionType.IN, category: saleCategory(resolvedSource), amount: total, userId: user.id, note: `Order #${dailyNumber}` }
       })
     }
 
@@ -223,11 +251,13 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
   void fireWebhook({
     type: 'order.created',
     orderId: order.id,
+    orderNumber: order.dailyNumber,
     customer: customer ?? null,
-    totalAmount: total.toString()
+    totalAmount: total.toString(),
+    items: items.map((it) => ({ name: getProduct(it.productId).name, kg: it.kg.toString() }))
   })
   void notifyIfLowStock(productIds)
-  await storeIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey, JSON.parse(JSON.stringify(full)))
+  await storeIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey, toIdempotentJson(full))
   res.status(HTTP_STATUS.CREATED).json(full)
 }))
 
@@ -278,6 +308,10 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
   }, INITIAL_TOTAL)
 
   const draft = await prisma.$transaction(async (tx) => {
+    // Drafts get a daily number too (Phase L, ADR-015) — they're already
+    // real, visible cards on the Inbox/kanban board, and promoting one
+    // later keeps the same number rather than reassigning.
+    const dailyNumber = await nextDailyOrderNumber(tx)
     const created = await tx.order.create({
       data: {
         customer,
@@ -286,6 +320,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
         deliveryAddress,
         paymentMethod,
         source,
+        dailyNumber,
         totalAmount: total,
         userId: user.id,
         status: OrderStatus.DRAFT
@@ -309,7 +344,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
   })
 
   const full = await prisma.order.findUnique({ where: { id: draft.id }, include: { items: true } })
-  await storeIdempotentResponse(CREATE_DRAFT_ENDPOINT, idempotencyKey, JSON.parse(JSON.stringify(full)))
+  await storeIdempotentResponse(CREATE_DRAFT_ENDPOINT, idempotencyKey, toIdempotentJson(full))
   res.status(HTTP_STATUS.CREATED).json(full)
 }))
 
@@ -382,10 +417,10 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
 
     // v3 replan (Phase K, ADR-011): promoting a draft is the moment it
     // becomes a real, stock-decremented sale — same rule as the direct
-    // POST / path above, kept in sync deliberately (see SALE_CATEGORY).
+    // POST / path above, kept in sync deliberately (see saleCategory()).
     if (existing.paymentMethod === 'cash') {
       await tx.cashTransaction.create({
-        data: { type: CashTransactionType.IN, category: SALE_CATEGORY, amount: existing.totalAmount, userId: user.id, note: `Order ${id}` }
+        data: { type: CashTransactionType.IN, category: saleCategory(existing.source), amount: existing.totalAmount, userId: user.id, note: `Order #${existing.dailyNumber ?? '?'}` }
       })
     }
   })
@@ -394,11 +429,13 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
   void fireWebhook({
     type: 'order.created',
     orderId: id,
+    orderNumber: existing.dailyNumber,
     customer: existing.customer,
-    totalAmount: existing.totalAmount.toString()
+    totalAmount: existing.totalAmount.toString(),
+    items: existing.items.map((it) => ({ name: productMap.get(it.productId)?.name ?? 'Unknown', kg: it.kg.toString() }))
   })
   void notifyIfLowStock(productIds)
-  await storeIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey, JSON.parse(JSON.stringify(full)))
+  await storeIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey, toIdempotentJson(full))
   res.json(full)
 }))
 
@@ -440,7 +477,10 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     return
   }
 
-  const existing = await prisma.order.findUnique({ where: { id } })
+  const existing = await prisma.order.findUnique({
+    where: { id },
+    include: { items: { include: { product: true } } }
+  })
   if (existing === null) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
     return
@@ -460,11 +500,49 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     await tx.orderStatusEvent.create({
       data: { orderId: id, status: nextStatus, changedBy: user.id }
     })
+
+    // v3.1 bug fix: cancelling an order previously left its ingredients
+    // "sold" forever — the stock decrement from creation/promotion time was
+    // never reversed. CANCELLED is only reachable from here once every
+    // other status (CREATED/IN_PROGRESS/ON_THE_WAY/IN_PREMISE, guarded
+    // above against DRAFT and re-cancelling), all of which already
+    // decremented stock — so it's always correct to give it back now.
+    // `increment` is a DB-side atomic op, not a JS read-then-write, so this
+    // is safe to run concurrently across items even if two line items
+    // happen to share a productId.
+    if (nextStatus === OrderStatus.CANCELLED) {
+      await Promise.all(existing.items.map(async (it) => {
+        await tx.product.update({
+          where: { id: it.productId },
+          data: { stockKg: { increment: Number(it.kg) } }
+        })
+      }))
+
+      // Reverses the auto-logged sale entry too, so a cancelled order stops
+      // counting as cash in the drawer. Per ADR-011's append-only ledger
+      // rule, this is a new OUT entry — the original IN row is never
+      // edited or deleted.
+      if (existing.paymentMethod === 'cash') {
+        await tx.cashTransaction.create({
+          data: {
+            type: CashTransactionType.OUT,
+            category: SALE_REVERSAL_CATEGORY,
+            amount: existing.totalAmount,
+            userId: user.id,
+            note: `Cancelled order #${existing.dailyNumber ?? '?'}`
+          }
+        })
+      }
+    }
   })
 
   void fireWebhook({
     type: 'order.status_changed',
     orderId: id,
+    orderNumber: existing.dailyNumber,
+    customer: existing.customer,
+    totalAmount: existing.totalAmount.toString(),
+    items: existing.items.map((it) => ({ name: it.product.name, kg: it.kg.toString() })),
     status: nextStatus,
     previousStatus
   })

@@ -32,6 +32,26 @@ export async function storeIdempotentResponse(endpoint: string, key: string | un
   })
 }
 
+// Every call site needs to strip a Prisma result (Decimal/Date fields) down
+// to plain JSON before it's storable as `Prisma.InputJsonValue` — the
+// round-trip through `JSON.parse(JSON.stringify(...))` is the simplest way,
+// but `JSON.parse` itself returns `any`, which would otherwise flow an
+// unsafe argument into every caller of `storeIdempotentResponse`. Centralizing
+// the round-trip (and its one necessary cast) here means every call site
+// passes a properly-typed value instead of repeating an unsafe `any` at each
+// of them.
+export function toIdempotentJson(value: unknown): Prisma.InputJsonValue {
+  const roundTripped: unknown = JSON.parse(JSON.stringify(value))
+  // Genuinely unavoidable here, not a lazy cast: `JSON.parse`'s result has
+  // no static type more precise than `unknown`/`any` — there's no runtime
+  // shape TypeScript can verify a round-tripped Prisma result against ahead
+  // of time, short of writing a full recursive JSON-value type guard for a
+  // one-line helper. Scoped to this single return, same precedent as
+  // lib/whatsapp.ts's Meta-payload casts.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- JSON.parse has no more precise static type; see comment above
+  return roundTripped as Prisma.InputJsonValue
+}
+
 // Reads the standard `Idempotency-Key` header — pulled into a helper so
 // every route that supports it extracts it the same (case-insensitive,
 // Express lower-cases header names already) way.

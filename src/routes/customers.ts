@@ -12,6 +12,8 @@ const router = Router()
 const MIN_NAME_LENGTH = 1
 const SEARCH_RESULT_LIMIT = 20
 const INITIAL_SPEND = 0
+const CURRENCY_DECIMALS = 2
+const MOST_RECENT_INDEX = 0
 
 // v3 replan (Phase H — CRM, ADR-012). GET/POST here are deliberately gated
 // by plain `auth`, not `requireCap('manage_orders')`: the New Order page
@@ -54,12 +56,16 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
   }
   const { orders, ...rest } = customer
   const totalSpend = orders.reduce((sum, o) => sum + Number(o.totalAmount), INITIAL_SPEND)
-  const [mostRecent] = orders
   res.json({
     ...rest,
     orders,
-    totalSpend: totalSpend.toFixed(2),
-    lastOrderAt: mostRecent === undefined ? null : mostRecent.createdAt
+    totalSpend: totalSpend.toFixed(CURRENCY_DECIMALS),
+    // `orders[0]` rather than a destructured `const [mostRecent] = orders`:
+    // without `noUncheckedIndexedAccess`, TS treats array-destructuring
+    // access as always-defined, which made an explicit `=== undefined`
+    // check look unreachable to @typescript-eslint/no-unnecessary-condition.
+    // Indexed access plus optional chaining sidesteps that entirely.
+    lastOrderAt: orders[MOST_RECENT_INDEX]?.createdAt ?? null
   })
 }))
 
