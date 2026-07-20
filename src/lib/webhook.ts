@@ -18,9 +18,16 @@
 // Both order events now carry the same core order data (customer,
 // totalAmount, orderNumber, items); only the fields specific to *why* the
 // event fired differ between them.
+// v3.1 follow-up 2: the array items were originally keyed `name`, which
+// collides with the top-level `name` field used by `product.low_stock`
+// events. Downstream tools (Make.com) that treat a webhook payload as one
+// flat variable scope resolve a bare `name` reference to the top-level
+// field rather than the array element's field, breaking any per-item
+// mapping (e.g. Make's `map(items; name)`) for every order event. Keyed
+// `itemName` instead so it can never collide with a sibling field.
 export type WebhookEvent =
-  | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ name: string, kg: string }> }
-  | { type: 'order.status_changed', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ name: string, kg: string }>, status: string, previousStatus: string }
+  | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }> }
+  | { type: 'order.status_changed', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }>, status: string, previousStatus: string }
   | { type: 'product.low_stock', productId: string, name: string, stockKg: string, thresholdKg: string }
 
 export async function fireWebhook(event: WebhookEvent): Promise<void> {

@@ -254,7 +254,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
     orderNumber: order.dailyNumber,
     customer: customer ?? null,
     totalAmount: total.toString(),
-    items: items.map((it) => ({ name: getProduct(it.productId).name, kg: it.kg.toString() }))
+    items: items.map((it) => ({ itemName: getProduct(it.productId).name, kg: it.kg.toString() }))
   })
   void notifyIfLowStock(productIds)
   await storeIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey, toIdempotentJson(full))
@@ -432,7 +432,7 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
     orderNumber: existing.dailyNumber,
     customer: existing.customer,
     totalAmount: existing.totalAmount.toString(),
-    items: existing.items.map((it) => ({ name: productMap.get(it.productId)?.name ?? 'Unknown', kg: it.kg.toString() }))
+    items: existing.items.map((it) => ({ itemName: productMap.get(it.productId)?.name ?? 'Unknown', kg: it.kg.toString() }))
   })
   void notifyIfLowStock(productIds)
   await storeIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey, toIdempotentJson(full))
@@ -542,7 +542,7 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     orderNumber: existing.dailyNumber,
     customer: existing.customer,
     totalAmount: existing.totalAmount.toString(),
-    items: existing.items.map((it) => ({ name: it.product.name, kg: it.kg.toString() })),
+    items: existing.items.map((it) => ({ itemName: it.product.name, kg: it.kg.toString() })),
     status: nextStatus,
     previousStatus
   })
