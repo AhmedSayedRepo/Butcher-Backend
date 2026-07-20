@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer'
 import { getOrCreateSettings } from './shopSettings.js'
 import { decryptSecret } from './encryption.js'
+import { getErrorMessage } from './errors.js'
 
 // v3 follow-up: transactional email for the admin-invite / password-reset
 // auth flow. Same "opt-in, fire-and-forget where it can be" shape as
@@ -94,7 +95,18 @@ async function sendEmail(to: string, subject: string, html: string): Promise<boo
     const displayFrom = `${settings.mailSenderName} <${user}>`
     await transport.sendMail({ from: displayFrom, to, subject, html })
     return true
-  } catch {
+  } catch (err) {
+    // v3.1 follow-up 11: this used to swallow the real error completely —
+    // `sendEmail` returning `false` on a bounded ~13s connection timeout
+    // and returning `false` on, say, a genuine auth rejection look
+    // identical from the caller's side, and neither was ever written
+    // anywhere, including Render's own logs. There was no way for anyone —
+    // including whoever's debugging this deployment — to tell which one
+    // actually happened. `morgan`'s stream is `process.stdout.write`
+    // already (see index.ts), so this uses the matching `stderr` write
+    // rather than a bare `console.error` (blocked by this repo's
+    // `no-console` rule elsewhere for the same reason).
+    process.stderr.write(`sendEmail failed: ${getErrorMessage(err)}\n`)
     return false
   }
 }
