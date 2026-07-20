@@ -51,7 +51,7 @@ const BCRYPT_SALT_ROUNDS = 10
 // email address alone), this is safe here because only an already-
 // authenticated admin ever sees this response, and it doubles as a manual
 // fallback for sharing the link (WhatsApp, in person, etc.) before
-// RESEND_API_KEY is configured or if the send fails.
+// SMTP_USER/SMTP_APP_PASSWORD are configured or if the send fails.
 router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
   const parsed = InviteUserSchema.safeParse(req.body)
   if (!parsed.success) {

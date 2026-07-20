@@ -20,6 +20,9 @@ const OutputSchema = z.object({
   cutName: z.string().min(MIN_LABEL_LENGTH),
   actualWeightKg: z.number().positive(),
   isOffal: z.boolean().default(false),
+  // v3.1 follow-up 7: non-edible slaughter byproduct (hide/pelt, blood,
+  // head/feet) — see the schema comment on DismantleTemplateCut.
+  isByproduct: z.boolean().default(false),
   productId: z.string().uuid().optional(),
   newProduct: z.object({
     name: z.string().min(MIN_LABEL_LENGTH),
@@ -146,6 +149,7 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
           cutName: o.cutName,
           actualWeightKg: o.actualWeightKg,
           isOffal: o.isOffal,
+          isByproduct: o.isByproduct,
           productId
         }
       })

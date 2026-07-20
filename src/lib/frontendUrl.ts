@@ -1,4 +1,4 @@
-const TRAILING_SLASHES = /\/+$/
+const TRAILING_SLASHES = /\/+$/v
 
 // v3 follow-up (admin-invite / password-reset auth flow): builds the base
 // URL embedded in emailed links. FRONTEND_URL isn't set anywhere else in

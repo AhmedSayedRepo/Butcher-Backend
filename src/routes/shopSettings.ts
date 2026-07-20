@@ -24,10 +24,17 @@ router.get('/', auth, asyncHandler(async (_req, res) => {
 }))
 
 const MIN_ALERT_MINUTES = 1
+const MIN_LOW_STOCK_THRESHOLD_KG = 0
+const MIN_MAIL_SENDER_NAME_LENGTH = 1
 
+// v3.1 follow-up 5 (Settings page): defaultLowStockThresholdKg/mailSenderName
+// added alongside the existing Phase J fields — same single-row shop-policy
+// table, same admin-only PATCH gate.
 const UpdateShopSettingsSchema = z.object({
   pendingOrderAlertMinutes: z.number().int().min(MIN_ALERT_MINUTES).optional(),
-  alertSoundEnabled: z.boolean().optional()
+  alertSoundEnabled: z.boolean().optional(),
+  defaultLowStockThresholdKg: z.number().gt(MIN_LOW_STOCK_THRESHOLD_KG).optional(),
+  mailSenderName: z.string().min(MIN_MAIL_SENDER_NAME_LENGTH).optional()
 })
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {

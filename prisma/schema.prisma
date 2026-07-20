@@ -122,6 +122,17 @@ model ShopSettings {
   // the boundary the next closing's summary is computed from.
   dailyOrderCounter       Int      @default(0)
   lastClosedAt            DateTime?
+  // v3.1 follow-up 5 (Settings page). Both previously hardcoded constants
+  // duplicated across backend (lib/lowStock.ts, lib/email.ts) and frontend
+  // (app/page.tsx, app/inventory/page.tsx) — now single-sourced here and
+  // editable from /settings (admin-only, same tier as the other fields on
+  // this model). `defaultLowStockThresholdKg` is the shop-wide fallback used
+  // when a product has no per-product `lowStockAlertKg` override.
+  // `mailSenderName` is the display name shown on outgoing invite/reset
+  // emails (lib/email.ts) — the address itself is always the authenticated
+  // SMTP_USER, only the name is configurable.
+  defaultLowStockThresholdKg Decimal @default(5) @db.Decimal(10, 3)
+  mailSenderName             String  @default("Butcher Cashier")
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction
@@ -167,12 +178,24 @@ model Product {
 // (no stock decrement yet, see Order.status default below); CREATED is the
 // same state every existing order is already in today, so the default below
 // keeps every current row valid with no backfill.
+// v3.1 follow-up 6 (final order state + receipt confirmation). COMPLETED is
+// the one true terminal "done" state for a fulfilled order (CANCELLED is
+// terminal too, but means the opposite — never happened). Reachable two
+// ways, deliberately different in trust level: IN_PREMISE -> COMPLETED is a
+// plain manual staff action (PATCH /:id/status) since a walk-in/pickup
+// order is handed over and paid for in front of the cashier already.
+// ON_THE_WAY -> COMPLETED requires scanning the order's `receiptCode` via
+// POST /:id/scan-receipt instead — a delivery order's cash is only
+// confirmed once the receipt physically comes back, so the status change
+// shouldn't be a single unchecked button click the way every other
+// transition is.
 enum OrderStatus {
   DRAFT
   CREATED
   IN_PROGRESS
   ON_THE_WAY
   IN_PREMISE
+  COMPLETED
   CANCELLED
 }
 
@@ -216,6 +239,13 @@ model Order {
   // until non-cash payment methods are confirmed in use — see v3 plan's
   // open question 4).
   paymentMethod   String   @default("cash")
+  // v3.1 follow-up 6: short random code (lib/receiptCode.ts) assigned once
+  // an order becomes real (creation or draft promotion — never on a
+  // DRAFT), printed on the receipt. The only way an ON_THE_WAY order can
+  // reach COMPLETED — see the OrderStatus comment above. Nullable because
+  // pre-migration order rows have none, and DRAFT rows never get one at
+  // all (nothing to scan for an order that hasn't happened yet).
+  receiptCode String? @unique
   createdAt   DateTime    @default(now())
   userId      String
   user        User        @relation(fields: [userId], references: [id])
@@ -284,6 +314,12 @@ model DismantleTemplateCut {
   cutName          String                   // e.g. "Shoulder", "Rib (Hotel Rack)", "Offal"
   expectedYieldPct Decimal  @db.Decimal(5,2) // % of carcass weight, for variance reporting
   isOffal          Boolean  @default(false)  // flags organ-meat/"fifth quarter" lines so the UI can subtotal them separately from primal cuts
+  // v3.1 follow-up 7: flags non-edible slaughter byproducts (hide/pelt,
+  // blood, head/feet) on "Whole Animal (On-Site Slaughter)" templates —
+  // distinct from isOffal (edible organ meat). Lets the UI tag/subtotal
+  // these separately instead of them either being missing entirely or
+  // getting lumped in with real meat cuts.
+  isByproduct      Boolean  @default(false)
 
   template DismantleTemplate @relation(fields: [templateId], references: [id])
 }
@@ -328,6 +364,7 @@ model DismantleEventOutput {
   cutName        String
   actualWeightKg Decimal  @db.Decimal(10,3)  // what the scale actually said
   isOffal        Boolean  @default(false)    // copied from the template cut at record time, in case the template changes later
+  isByproduct    Boolean  @default(false)    // same "copied at record time" reasoning as isOffal — see DismantleTemplateCut
   productId      String?                    // which inventory Product this got stocked into, if any
 
   event   DismantleEvent @relation(fields: [eventId], references: [id])

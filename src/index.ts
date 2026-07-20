@@ -10,6 +10,7 @@ import helmet from 'helmet'
 import { prisma } from './lib/db.js'
 import products from './routes/products.js'
 import orders from './routes/orders.js'
+import orderReceiptScan from './routes/orderReceiptScan.js'
 import parseOrder from './routes/parseOrder.js'
 import authRouter from './routes/auth.js'
 import usersRouter from './routes/users.js'
@@ -85,6 +86,9 @@ app.get('/health', asyncHandler(async (_req, res) => {
 app.use('/auth', authRouter)
 app.use('/api/products', products)
 app.use('/api/orders', orders)
+// v3.1 follow-up 6: split out of routes/orders.ts to stay under max-lines —
+// same '/api/orders' prefix, Express supports multiple routers on one path.
+app.use('/api/orders', orderReceiptScan)
 app.use('/api/parse-order', parseOrder)
 app.use('/api/users', usersRouter)
 app.use('/api/dismantle-templates', dismantleTemplatesRouter)

@@ -20,14 +20,25 @@
 // event fired differ between them.
 // v3.1 follow-up 2: the array items were originally keyed `name`, which
 // collides with the top-level `name` field used by `product.low_stock`
-// events. Downstream tools (Make.com) that treat a webhook payload as one
-// flat variable scope resolve a bare `name` reference to the top-level
-// field rather than the array element's field, breaking any per-item
-// mapping (e.g. Make's `map(items; name)`) for every order event. Keyed
-// `itemName` instead so it can never collide with a sibling field.
+// events — renamed to `itemName` so it can't collide with a sibling field.
+// That turned out not to be the real bug, though: Make.com's `map()`
+// function throws `'{empty}' is not a valid key` whenever it isn't handed a
+// genuine array (confirmed against Make's own community forum — this is a
+// known Make behavior, not something fixable by renaming a field), and
+// Make's `if()` does not short-circuit, so no in-formula guard clause can
+// protect a `map()`/`join()` call from ever running. Every downstream tool
+// that tries to flatten `items` into a string is at the mercy of that
+// engine's array handling.
+// v3.1 follow-up 3: stopped asking downstream low-code tools to flatten
+// `items` at all. `itemsSummary` is a plain, backend-computed string
+// (`"Beef 2kg, Chicken 1kg"`), built with ordinary, fully-tested JS
+// `.map().join()` — the same shape as every other scalar field here
+// (`customer`, `totalAmount`, ...), none of which have ever caused a
+// downstream error. `items` (the array) is kept too, for any future
+// consumer that wants the structured form.
 export type WebhookEvent =
-  | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }> }
-  | { type: 'order.status_changed', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }>, status: string, previousStatus: string }
+  | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }>, itemsSummary: string }
+  | { type: 'order.status_changed', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }>, itemsSummary: string, status: string, previousStatus: string }
   | { type: 'product.low_stock', productId: string, name: string, stockKg: string, thresholdKg: string }
 
 export async function fireWebhook(event: WebhookEvent): Promise<void> {

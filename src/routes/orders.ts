@@ -11,6 +11,9 @@ import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
 import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom, toIdempotentJson } from '../lib/idempotency.js'
 import { nextDailyOrderNumber } from '../lib/dailyOrderNumber.js'
+import { getOrCreateSettings } from '../lib/shopSettings.js'
+import { generateReceiptCode } from '../lib/receiptCode.js'
+import { itemsSummary } from '../lib/orderItemsSummary.js'
 
 const router = Router()
 
@@ -87,15 +90,19 @@ const CreateOrderSchema = z.object({
 // `product.low_stock` webhook (Phase F) for any that crossed the threshold.
 // Fire-and-forget (see lib/webhook.ts) — never blocks or fails the request.
 async function notifyIfLowStock(productIds: string[]): Promise<void> {
-  const updated = await prisma.product.findMany({ where: { id: { in: productIds } } })
+  const [updated, settings] = await Promise.all([
+    prisma.product.findMany({ where: { id: { in: productIds } } }),
+    getOrCreateSettings()
+  ])
+  const shopDefaultThresholdKg = Number(settings.defaultLowStockThresholdKg)
   for (const p of updated) {
-    if (isLowStock(p)) {
+    if (isLowStock(p, shopDefaultThresholdKg)) {
       void fireWebhook({
         type: 'product.low_stock',
         productId: p.id,
         name: p.name,
         stockKg: p.stockKg.toString(),
-        thresholdKg: (p.lowStockAlertKg ?? '').toString()
+        thresholdKg: (p.lowStockAlertKg ?? shopDefaultThresholdKg).toString()
       })
     }
   }
@@ -110,9 +117,12 @@ router.get('/', auth, asyncHandler(async (req, res) => {
   const where = typeof status === 'string' && isOrderStatus(status)
     ? { status }
     : {}
+  // v3.1 follow-up 6: items now include their `product` relation (just
+  // name/unit worth of data added on the wire) so the order-detail popup
+  // can show real product names instead of only productId/kg/price.
   const orders = await prisma.order.findMany({
     where,
-    include: { items: true },
+    include: { items: { include: { product: true } } },
     orderBy: { createdAt: 'desc' }
   })
   res.json(orders)
@@ -206,6 +216,9 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
         paymentMethod,
         source,
         dailyNumber,
+        // v3.1 follow-up 6: printed on the receipt, scanned back in later to
+        // confirm an ON_THE_WAY order and move it to COMPLETED.
+        receiptCode: generateReceiptCode(),
         totalAmount: total,
         userId: user.id
       }
@@ -248,13 +261,15 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
   })
 
   const full = await prisma.order.findUnique({ where: { id: order.id }, include: { items: true } })
+  const webhookItems = items.map((it) => ({ itemName: getProduct(it.productId).name, kg: it.kg.toString() }))
   void fireWebhook({
     type: 'order.created',
     orderId: order.id,
     orderNumber: order.dailyNumber,
     customer: customer ?? null,
     totalAmount: total.toString(),
-    items: items.map((it) => ({ itemName: getProduct(it.productId).name, kg: it.kg.toString() }))
+    items: webhookItems,
+    itemsSummary: itemsSummary(webhookItems)
   })
   void notifyIfLowStock(productIds)
   await storeIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey, toIdempotentJson(full))
@@ -402,7 +417,10 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.order.update({ where: { id }, data: { status: OrderStatus.CREATED } })
+    // v3.1 follow-up 6: a draft hasn't happened yet, so it gets no
+    // receiptCode until this exact moment — the same rule as the direct
+    // POST / path (never assigned to a DRAFT row).
+    await tx.order.update({ where: { id }, data: { status: OrderStatus.CREATED, receiptCode: generateReceiptCode() } })
     await tx.orderStatusEvent.create({
       data: { orderId: id, status: OrderStatus.CREATED, changedBy: user.id }
     })
@@ -426,13 +444,15 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
   })
 
   const full = await prisma.order.findUnique({ where: { id }, include: { items: true } })
+  const webhookItems = existing.items.map((it) => ({ itemName: productMap.get(it.productId)?.name ?? 'Unknown', kg: it.kg.toString() }))
   void fireWebhook({
     type: 'order.created',
     orderId: id,
     orderNumber: existing.dailyNumber,
     customer: existing.customer,
     totalAmount: existing.totalAmount.toString(),
-    items: existing.items.map((it) => ({ itemName: productMap.get(it.productId)?.name ?? 'Unknown', kg: it.kg.toString() }))
+    items: webhookItems,
+    itemsSummary: itemsSummary(webhookItems)
   })
   void notifyIfLowStock(productIds)
   await storeIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey, toIdempotentJson(full))
@@ -443,11 +463,12 @@ const PROMOTABLE_STATUSES: readonly OrderStatus[] = [
   OrderStatus.IN_PROGRESS,
   OrderStatus.ON_THE_WAY,
   OrderStatus.IN_PREMISE,
+  OrderStatus.COMPLETED,
   OrderStatus.CANCELLED
 ]
 
 const UpdateStatusSchema = z.object({
-  status: z.enum(['IN_PROGRESS', 'ON_THE_WAY', 'IN_PREMISE', 'CANCELLED'])
+  status: z.enum(['IN_PROGRESS', 'ON_THE_WAY', 'IN_PREMISE', 'COMPLETED', 'CANCELLED'])
 })
 
 // v2 replan (Phase C): moves a card between kanban columns. DRAFT→CREATED
@@ -493,6 +514,19 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This order is cancelled' })
     return
   }
+  // v3.1 follow-up 6: COMPLETED is reachable here only from IN_PREMISE — a
+  // walk-in/pickup order is handed over and paid in front of the cashier,
+  // so a plain manual status change is trustworthy. An ON_THE_WAY order's
+  // cash isn't confirmed until the receipt physically comes back, so it
+  // must go through POST /:id/scan-receipt instead, never this endpoint.
+  if (nextStatus === OrderStatus.COMPLETED && existing.status !== OrderStatus.IN_PREMISE) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({
+      error: existing.status === OrderStatus.ON_THE_WAY
+        ? 'On-the-way orders can only be completed by scanning the receipt (POST /:id/scan-receipt)'
+        : 'Only in-premise orders can be marked completed directly'
+    })
+    return
+  }
 
   const previousStatus: OrderStatus = existing.status
   await prisma.$transaction(async (tx) => {
@@ -536,19 +570,28 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     }
   })
 
+  const statusChangeItems = existing.items.map((it) => ({ itemName: it.product.name, kg: it.kg.toString() }))
   void fireWebhook({
     type: 'order.status_changed',
     orderId: id,
     orderNumber: existing.dailyNumber,
     customer: existing.customer,
     totalAmount: existing.totalAmount.toString(),
-    items: existing.items.map((it) => ({ itemName: it.product.name, kg: it.kg.toString() })),
+    items: statusChangeItems,
+    itemsSummary: itemsSummary(statusChangeItems),
     status: nextStatus,
     previousStatus
   })
 
-  const full = await prisma.order.findUnique({ where: { id }, include: { items: true } })
+  const full = await prisma.order.findUnique({ where: { id }, include: { items: { include: { product: true } } } })
   res.json(full)
 }))
+
+// v3.1 follow-up 6: POST /:id/scan-receipt (the only path from ON_THE_WAY to
+// COMPLETED) lives in routes/orderReceiptScan.ts, mounted alongside this
+// router on the same '/api/orders' prefix in index.ts. Pulled out of this
+// file specifically to stay under the max-lines limit — Express supports
+// multiple routers sharing one path prefix, so this is a plain file split,
+// not a behavior change.
 
 export default router

@@ -81,7 +81,7 @@ interface TemplateSeed {
   name: string
   animalType: string
   description: string
-  cuts: Array<{ cutName: string, expectedYieldPct: number, isOffal?: boolean }>
+  cuts: Array<{ cutName: string, expectedYieldPct: number, isOffal?: boolean, isByproduct?: boolean }>
 }
 
 const DISMANTLE_TEMPLATES: TemplateSeed[] = [
@@ -242,6 +242,124 @@ const DISMANTLE_TEMPLATES: TemplateSeed[] = [
       { cutName: 'Bones (goat bone soup)', expectedYieldPct: 1.50 },
       { cutName: 'Trim (for ground goat)', expectedYieldPct: 2.00 }
     ]
+  },
+  // v3.1 follow-up 7: cow templates, mirroring the sheep/goat naming
+  // convention (calf's own names predate this and stayed as-is). Same
+  // "general indicative estimate" caveat as every other template here —
+  // percentages are approximate USDA-style beef primal yields of the
+  // dressed carcass.
+  {
+    name: 'Standard Primal (Beef)',
+    animalType: 'cow',
+    description: 'Textbook beef primal breakdown of the dressed carcass, compiled from general USDA yield guides. Offal figure is a general indicative estimate.',
+    cuts: [
+      { cutName: 'Chuck', expectedYieldPct: 26.00 },
+      { cutName: 'Rib', expectedYieldPct: 10.00 },
+      { cutName: 'Short Loin & Sirloin', expectedYieldPct: 14.00 },
+      { cutName: 'Round', expectedYieldPct: 22.00 },
+      { cutName: 'Plate, Brisket & Flank (grouped)', expectedYieldPct: 19.00 },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true }
+    ]
+  },
+  {
+    name: 'Forequarter / Hindquarter Split',
+    animalType: 'cow',
+    description: 'Coarse wholesale first-split of a whole beef carcass, before finer fabrication. Same template name already used for goat.',
+    cuts: [
+      { cutName: 'Forequarter (chuck, rib, plate, brisket)', expectedYieldPct: 51.00 },
+      { cutName: 'Hindquarter (loin, sirloin, flank, round)', expectedYieldPct: 40.00 },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true }
+    ]
+  },
+  {
+    name: 'Retail Sub-Primal (Beef)',
+    animalType: 'cow',
+    description: 'Same primals as the Standard template, named for the retail cuts each yields.',
+    cuts: [
+      { cutName: 'Chuck (roast / steaks / ground)', expectedYieldPct: 26.00 },
+      { cutName: 'Rib (ribeye / prime rib)', expectedYieldPct: 10.00 },
+      { cutName: 'Short Loin & Sirloin (strip / T-bone / sirloin steak)', expectedYieldPct: 14.00 },
+      { cutName: 'Round (roast / steaks / ground)', expectedYieldPct: 22.00 },
+      { cutName: 'Plate, Brisket & Flank (grouped)', expectedYieldPct: 19.00 },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true }
+    ]
+  },
+  {
+    name: 'Nose-to-Tail (Beef)',
+    animalType: 'cow',
+    description: 'Retail cuts plus itemized offal (liver/kidneys/heart), oxtail, bones, and trim tracked as real outputs instead of written off as waste.',
+    cuts: [
+      { cutName: 'Chuck (roast / steaks / ground)', expectedYieldPct: 26.00 },
+      { cutName: 'Rib (ribeye / prime rib)', expectedYieldPct: 10.00 },
+      { cutName: 'Short Loin & Sirloin (strip / T-bone / sirloin steak)', expectedYieldPct: 14.00 },
+      { cutName: 'Round (roast / steaks / ground)', expectedYieldPct: 22.00 },
+      { cutName: 'Plate, Brisket & Flank (grouped)', expectedYieldPct: 15.00 },
+      { cutName: 'Liver', expectedYieldPct: 1.50, isOffal: true },
+      { cutName: 'Kidneys', expectedYieldPct: 0.50, isOffal: true },
+      { cutName: 'Heart', expectedYieldPct: 0.50, isOffal: true },
+      { cutName: 'Oxtail', expectedYieldPct: 1.00 },
+      { cutName: 'Bones (for stock)', expectedYieldPct: 2.00 },
+      { cutName: 'Trim (for ground beef)', expectedYieldPct: 3.00 }
+    ]
+  },
+  // v3.1 follow-up 7: "why don't the templates consider hide/pelt/blood?" —
+  // the templates above model the dressed-carcass breakdown (standard
+  // published butchery yield data assumes hide/blood already removed by the
+  // supplier). These four cover the other real case: the animal arrives
+  // whole and this shop does the skinning/bleeding itself. Deliberately not
+  // merged into one giant template — the "Dressed Carcass" line here is
+  // meant to be re-weighed and run through a *second* dismantle event
+  // against one of the species' regular carcass templates above, same way a
+  // real two-stage breakdown actually happens on the floor. Percentages are
+  // rough live-to-dressed yield estimates; actual dressing % varies
+  // significantly by breed/age/fasting status.
+  {
+    name: 'Whole Animal (On-Site Slaughter)',
+    animalType: 'cow',
+    description: 'Use only when the animal arrived whole (hide/blood not yet removed). Record the "Dressed Carcass" output weight as the inputWeightKg of a follow-up event against a regular beef carcass template.',
+    cuts: [
+      { cutName: 'Dressed Carcass (for further breakdown)', expectedYieldPct: 60.00 },
+      { cutName: 'Hide/Pelt', expectedYieldPct: 7.00, isByproduct: true },
+      { cutName: 'Blood', expectedYieldPct: 3.50, isByproduct: true },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true },
+      { cutName: 'Head, Feet & Other Byproducts', expectedYieldPct: 25.50, isByproduct: true }
+    ]
+  },
+  {
+    name: 'Whole Animal (On-Site Slaughter)',
+    animalType: 'calf',
+    description: 'Use only when the animal arrived whole (hide/blood not yet removed). Record the "Dressed Carcass" output weight as the inputWeightKg of a follow-up event against a regular calf carcass template.',
+    cuts: [
+      { cutName: 'Dressed Carcass (for further breakdown)', expectedYieldPct: 58.00 },
+      { cutName: 'Hide/Pelt', expectedYieldPct: 8.00, isByproduct: true },
+      { cutName: 'Blood', expectedYieldPct: 3.50, isByproduct: true },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true },
+      { cutName: 'Head, Feet & Other Byproducts', expectedYieldPct: 26.50, isByproduct: true }
+    ]
+  },
+  {
+    name: 'Whole Animal (On-Site Slaughter)',
+    animalType: 'sheep',
+    description: 'Use only when the animal arrived whole (hide/blood not yet removed). Record the "Dressed Carcass" output weight as the inputWeightKg of a follow-up event against a regular lamb carcass template.',
+    cuts: [
+      { cutName: 'Dressed Carcass (for further breakdown)', expectedYieldPct: 50.00 },
+      { cutName: 'Hide/Pelt', expectedYieldPct: 10.00, isByproduct: true },
+      { cutName: 'Blood', expectedYieldPct: 3.50, isByproduct: true },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true },
+      { cutName: 'Head, Feet & Other Byproducts', expectedYieldPct: 32.50, isByproduct: true }
+    ]
+  },
+  {
+    name: 'Whole Animal (On-Site Slaughter)',
+    animalType: 'goat',
+    description: 'Use only when the animal arrived whole (hide/blood not yet removed). Record the "Dressed Carcass" output weight as the inputWeightKg of a follow-up event against a regular goat carcass template.',
+    cuts: [
+      { cutName: 'Dressed Carcass (for further breakdown)', expectedYieldPct: 47.00 },
+      { cutName: 'Hide/Pelt', expectedYieldPct: 9.00, isByproduct: true },
+      { cutName: 'Blood', expectedYieldPct: 3.50, isByproduct: true },
+      { cutName: 'Offal', expectedYieldPct: 4.00, isOffal: true },
+      { cutName: 'Head, Feet & Other Byproducts', expectedYieldPct: 36.50, isByproduct: true }
+    ]
   }
 ]
 
@@ -254,7 +372,7 @@ async function seedDismantleTemplates(): Promise<void> {
         name: t.name,
         animalType: t.animalType,
         description: t.description,
-        cuts: { create: t.cuts.map((c) => ({ cutName: c.cutName, expectedYieldPct: c.expectedYieldPct, isOffal: c.isOffal ?? false })) }
+        cuts: { create: t.cuts.map((c) => ({ cutName: c.cutName, expectedYieldPct: c.expectedYieldPct, isOffal: c.isOffal ?? false, isByproduct: c.isByproduct ?? false })) }
       }
     })
   }

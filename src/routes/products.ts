@@ -9,6 +9,7 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
+import { getOrCreateSettings } from '../lib/shopSettings.js'
 
 const router = Router()
 
@@ -105,14 +106,17 @@ function reasonRequiredError(stockChanged: boolean, reason: string | undefined):
 
 // Same reasoning as reasonRequiredError above — extracted so the PATCH
 // handler's own complexity stays low, not because this needs to be reused.
-function notifyIfNowLowStock(stockChanged: boolean, product: Product): void {
-  if (stockChanged && isLowStock(product)) {
+async function notifyIfNowLowStock(stockChanged: boolean, product: Product): Promise<void> {
+  if (!stockChanged) return
+  const settings = await getOrCreateSettings()
+  const shopDefaultThresholdKg = Number(settings.defaultLowStockThresholdKg)
+  if (isLowStock(product, shopDefaultThresholdKg)) {
     void fireWebhook({
       type: 'product.low_stock',
       productId: product.id,
       name: product.name,
       stockKg: product.stockKg.toString(),
-      thresholdKg: (product.lowStockAlertKg ?? '').toString()
+      thresholdKg: (product.lowStockAlertKg ?? shopDefaultThresholdKg).toString()
     })
   }
 }
@@ -172,7 +176,7 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
       })
     : await prisma.product.update({ where: { id }, data: fields })
 
-  notifyIfNowLowStock(stockChanged, product)
+  void notifyIfNowLowStock(stockChanged, product)
 
   res.json(product)
 }))
