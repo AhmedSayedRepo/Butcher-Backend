@@ -12,6 +12,9 @@ import products from './routes/products.js'
 import orders from './routes/orders.js'
 import parseOrder from './routes/parseOrder.js'
 import authRouter from './routes/auth.js'
+import usersRouter from './routes/users.js'
+import dismantleTemplatesRouter from './routes/dismantleTemplates.js'
+import dismantleEventsRouter from './routes/dismantleEvents.js'
 import { asyncHandler } from './lib/asyncHandler.js'
 import { HTTP_STATUS } from './lib/httpStatus.js'
 import { getErrorMessage } from './lib/errors.js'
@@ -67,6 +70,9 @@ app.use('/auth', authRouter)
 app.use('/api/products', products)
 app.use('/api/orders', orders)
 app.use('/api/parse-order', parseOrder)
+app.use('/api/users', usersRouter)
+app.use('/api/dismantle-templates', dismantleTemplatesRouter)
+app.use('/api/dismantle-events', dismantleEventsRouter)
 
 // Centralized error handler: asyncHandler forwards unexpected failures here
 // via `next(err)` instead of leaving them as unhandled promise rejections.

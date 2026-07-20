@@ -12,10 +12,20 @@ model User {
   email     String   @unique
   password  String
   role      String   @default("admin")
+  // v2 replan (Phase D — RBAC): fine-grained capability toggles per user,
+  // modeled on qa-studio's role-plus-capability pattern. Schema added now
+  // (Phase 0) so downstream phases don't need another migration; the actual
+  // role-check middleware/UI ships in Phase D. Default "[]" (no extra caps
+  // beyond whatever `role` implies) so this is a no-op for the existing
+  // single admin user until Phase D assigns real values.
+  caps      Json     @default("[]")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orders    Order[]
+  orders            Order[]
+  statusEvents      OrderStatusEvent[]
+  stockAdjustments  StockAdjustment[]
+  dismantleEvents   DismantleEvent[]
 }
 
 model Product {
@@ -24,20 +34,59 @@ model Product {
   unit        String   @default("kg")
   pricePerKg  Decimal  @db.Decimal(10,2)
   stockKg     Decimal  @db.Decimal(10,3)
+  // v2 replan (Phase B — inventory upgrades). Both optional/nullable so
+  // every existing product row stays valid with no backfill required.
+  category        String?
+  lowStockAlertKg Decimal? @db.Decimal(10,3)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  items       OrderItem[]
+  items            OrderItem[]
+  stockAdjustments StockAdjustment[]
+  dismantleOutputs DismantleEventOutput[]
+}
+
+// v2 replan (Phase C — order kanban). DRAFT = saved but not yet promoted
+// (no stock decrement yet, see Order.status default below); CREATED is the
+// same state every existing order is already in today, so the default below
+// keeps every current row valid with no backfill.
+enum OrderStatus {
+  DRAFT
+  CREATED
+  IN_PROGRESS
+  ON_THE_WAY
+  IN_PREMISE
+  CANCELLED
 }
 
 model Order {
   id          String      @id @default(uuid())
   customer    String?
-  totalAmount Decimal      @db.Decimal(10,2)
-  createdAt   DateTime     @default(now())
+  totalAmount Decimal     @db.Decimal(10,2)
+  status      OrderStatus @default(CREATED)
+  // v2 replan (Phase G — WhatsApp intake): "cashier" | "whatsapp". Default
+  // matches every order created before this migration.
+  source      String      @default("cashier")
+  createdAt   DateTime    @default(now())
   userId      String
-  user        User         @relation(fields: [userId], references: [id])
+  user        User        @relation(fields: [userId], references: [id])
   items       OrderItem[]
+  statusEvents OrderStatusEvent[]
+}
+
+// Append-only history of Order.status transitions — see ADR-006 in
+// Butcher-Project-Plan-v2.md for why this is a separate table rather than
+// just overwriting Order.status: the kanban board and dashboard charts both
+// need "when did this change," which a single column can't retain.
+model OrderStatusEvent {
+  id        String      @id @default(uuid())
+  orderId   String
+  status    OrderStatus
+  createdAt DateTime    @default(now())
+  changedBy String?     // userId; null for system/automated transitions (e.g. a WhatsApp bot promoting an order with no logged-in user driving it)
+
+  order         Order @relation(fields: [orderId], references: [id])
+  changedByUser User? @relation(fields: [changedBy], references: [id])
 }
 
 model OrderItem {
@@ -49,4 +98,69 @@ model OrderItem {
 
   order   Order   @relation(fields: [orderId], references: [id])
   product Product @relation(fields: [productId], references: [id])
+}
+
+// v2 replan (Phase B — inventory upgrades): records *why* stockKg changed
+// outside of a normal order (restock, correction, shrinkage/waste), rather
+// than letting PATCH /api/products/:id silently overwrite it with no trail.
+model StockAdjustment {
+  id        String   @id @default(uuid())
+  productId String
+  deltaKg   Decimal  @db.Decimal(10,3) // positive = added (restock), negative = removed (shrinkage/correction)
+  reason    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+// v2 replan (Phase B.5 — carcass dismantling module: calf, sheep, goat).
+// A template is just data (seeded, not hardcoded) describing one way to
+// break an animal down into named cuts with an expected yield %.
+model DismantleTemplate {
+  id          String   @id @default(uuid())
+  name        String                        // e.g. "Standard 5-Primal (USDA)"
+  animalType  String   @default("calf")     // "calf" | "sheep" | "goat" today; a new animal is just a new row, no schema change
+  description String?
+  createdAt   DateTime @default(now())
+
+  cuts   DismantleTemplateCut[]
+  events DismantleEvent[]
+}
+
+model DismantleTemplateCut {
+  id               String   @id @default(uuid())
+  templateId       String
+  cutName          String                   // e.g. "Shoulder", "Rib (Hotel Rack)", "Offal"
+  expectedYieldPct Decimal  @db.Decimal(5,2) // % of carcass weight, for variance reporting
+  isOffal          Boolean  @default(false)  // flags organ-meat/"fifth quarter" lines so the UI can subtotal them separately from primal cuts
+
+  template DismantleTemplate @relation(fields: [templateId], references: [id])
+}
+
+// One real event: a specific carcass, weighed in, broken down per a template.
+model DismantleEvent {
+  id            String   @id @default(uuid())
+  templateId    String
+  sourceLabel   String                       // e.g. "Calf #48, supplier X"
+  inputWeightKg Decimal  @db.Decimal(10,3)   // whole/half carcass weight as received
+  performedBy   String                       // userId
+  createdAt     DateTime @default(now())
+
+  template DismantleTemplate     @relation(fields: [templateId], references: [id])
+  user     User                  @relation(fields: [performedBy], references: [id])
+  outputs  DismantleEventOutput[]
+}
+
+model DismantleEventOutput {
+  id             String   @id @default(uuid())
+  eventId        String
+  cutName        String
+  actualWeightKg Decimal  @db.Decimal(10,3)  // what the scale actually said
+  isOffal        Boolean  @default(false)    // copied from the template cut at record time, in case the template changes later
+  productId      String?                    // which inventory Product this got stocked into, if any
+
+  event   DismantleEvent @relation(fields: [eventId], references: [id])
+  product Product?       @relation(fields: [productId], references: [id])
 }

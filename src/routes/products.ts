@@ -2,13 +2,21 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
+import type { AuthRequest } from '../middleware/auth.js'
+import { requireCap } from '../middleware/rbac.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { fireWebhook } from '../lib/webhook.js'
+import { isLowStock } from '../lib/lowStock.js'
 
 const router = Router()
 
-router.get('/', asyncHandler(async (_req, res) => {
-  const products = await prisma.product.findMany({ orderBy: { name: 'asc' } })
+// v2 replan (Phase B): optional `category` filter, e.g. GET /api/products?category=Beef
+// — additive, GET /api/products with no query still returns everything.
+router.get('/', asyncHandler(async (req, res) => {
+  const { category } = req.query
+  const where = typeof category === 'string' && category !== '' ? { category } : {}
+  const products = await prisma.product.findMany({ where, orderBy: { name: 'asc' } })
   res.json(products)
 }))
 
@@ -17,11 +25,20 @@ const MIN_NAME_LENGTH = 1
 const CreateProduct = z.object({
   name: z.string().min(MIN_NAME_LENGTH),
   unit: z.string().default('kg'),
+  category: z.string().min(MIN_NAME_LENGTH).optional(),
   pricePerKg: z.number().positive(),
-  stockKg: z.number().nonnegative()
+  stockKg: z.number().nonnegative(),
+  lowStockAlertKg: z.number().nonnegative().optional()
 })
 
-router.post('/', auth, asyncHandler(async (req, res) => {
+// v2 replan (Phase B): creating/editing products is exactly what the
+// `manage_inventory` capability (see lib/caps.ts, ADR-005) was defined for —
+// gating it here is what actually makes that capability mean something,
+// rather than existing only in the admin/users screen with nothing checking
+// it. The single seeded admin user has every capability by default, so this
+// is a no-op for today's only real user; it's cashier/manager accounts
+// added later (Phase D's /admin/users screen) that this actually restricts.
+router.post('/', auth, requireCap('manage_inventory'), asyncHandler(async (req, res) => {
   const parsed = CreateProduct.safeParse(req.body)
   if (!parsed.success) {
     res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
@@ -29,23 +46,35 @@ router.post('/', auth, asyncHandler(async (req, res) => {
   }
 
   const { data } = parsed
-  const { name, unit, pricePerKg, stockKg } = data
-  const product = await prisma.product.create({
-    data: { name, unit, pricePerKg, stockKg }
-  })
+  const product = await prisma.product.create({ data })
   res.status(HTTP_STATUS.CREATED).json(product)
 }))
 
 // Phase 3: inventory create/edit UI needs a way to update price/stock/name
 // on an existing product — only GET/POST existed before.
+//
+// v2 replan (Phase B): `stockKg` can still be edited directly here (e.g. a
+// quick correction from the inventory list), but any change to it now
+// requires a `reason` and is recorded as a StockAdjustment row — see the
+// audit-trail comment below. `category`/`lowStockAlertKg` are plain
+// optional fields, no special handling needed.
 const UpdateProduct = z.object({
   name: z.string().min(MIN_NAME_LENGTH).optional(),
   unit: z.string().optional(),
+  category: z.string().min(MIN_NAME_LENGTH).optional(),
   pricePerKg: z.number().positive().optional(),
-  stockKg: z.number().nonnegative().optional()
+  stockKg: z.number().nonnegative().optional(),
+  lowStockAlertKg: z.number().nonnegative().optional(),
+  reason: z.string().min(MIN_NAME_LENGTH).optional()
 })
 
-router.patch('/:id', auth, asyncHandler(async (req, res) => {
+router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequest>(async (req, res) => {
+  if (req.user === undefined) {
+    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    return
+  }
+  const { id: userId } = req.user
+
   const { params } = req
   const { id } = params
 
@@ -62,8 +91,61 @@ router.patch('/:id', auth, asyncHandler(async (req, res) => {
   }
 
   const { data } = parsed
-  const product = await prisma.product.update({ where: { id }, data })
+  const { reason, ...fields } = data
+  const stockChanged = fields.stockKg !== undefined && fields.stockKg !== Number(existing.stockKg)
+
+  if (stockChanged && reason === undefined) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({
+      error: 'A reason is required when changing stock directly (restock, correction, shrinkage, etc.)'
+    })
+    return
+  }
+
+  const product = stockChanged
+    ? await prisma.$transaction(async (tx) => {
+        const updated = await tx.product.update({ where: { id }, data: fields })
+        // fields.stockKg is defined whenever stockChanged is true (that's what
+        // the boolean checks above), but TS can't see that correlation through
+        // the destructured object — the reason-required check above already
+        // guarantees `reason` is a string here too.
+        const nextStockKg = fields.stockKg
+        if (nextStockKg !== undefined && reason !== undefined) {
+          await tx.stockAdjustment.create({
+            data: {
+              productId: id,
+              deltaKg: nextStockKg - Number(existing.stockKg),
+              reason,
+              userId
+            }
+          })
+        }
+        return updated
+      })
+    : await prisma.product.update({ where: { id }, data: fields })
+
+  if (stockChanged && isLowStock(product)) {
+    void fireWebhook({
+      type: 'product.low_stock',
+      productId: product.id,
+      name: product.name,
+      stockKg: product.stockKg.toString(),
+      thresholdKg: (product.lowStockAlertKg ?? '').toString()
+    })
+  }
+
   res.json(product)
+}))
+
+// v2 replan (Phase B): audit trail for a single product's stock history —
+// "why did this change," not just "what is it now."
+router.get('/:id/adjustments', asyncHandler(async (req, res) => {
+  const { params } = req
+  const { id } = params
+  const adjustments = await prisma.stockAdjustment.findMany({
+    where: { productId: id },
+    orderBy: { createdAt: 'desc' }
+  })
+  res.json(adjustments)
 }))
 
 export default router

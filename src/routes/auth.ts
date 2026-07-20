@@ -8,6 +8,7 @@ import { AUTH_COOKIE_NAME, auth, requireEnv } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { effectiveCaps } from '../lib/caps.js'
 
 const router = Router()
 
@@ -97,15 +98,26 @@ router.post('/logout', (_req, res) => {
   res.status(HTTP_STATUS.OK).json({ ok: true })
 })
 
-// No `asyncHandler` needed here — nothing async happens once `auth` has
-// already verified the token; wrapping a handler with no `await` in an
-// `async` function trips @typescript-eslint/require-await for no reason.
-router.get('/me', auth, (req: AuthRequest, res) => {
+// v2 replan (Phase D): now also returns effective caps, computed fresh from
+// the DB rather than the JWT — the JWT only ever carried id/email/role (see
+// middleware/auth.ts), and caps didn't exist yet when that shape was fixed.
+// This is the one place a plain (not requireRole/requireCap-gated) endpoint
+// does a DB round-trip for role/caps freshness: it's called once per page
+// load via the frontend's useAuth() hook, not per-request like a route
+// guard, so the extra query here is cheap and keeps the UI's "what can I
+// see" decision in sync with the latest admin change without waiting for
+// the cookie to be reissued.
+router.get('/me', auth, asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  res.json(req.user)
-})
+  const current = await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true, caps: true } })
+  if (current === null) {
+    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    return
+  }
+  res.json({ ...req.user, role: current.role, caps: effectiveCaps(current.role, current.caps) })
+}))
 
 export default router
