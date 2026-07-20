@@ -16,7 +16,8 @@ export type WebhookEvent =
   | { type: 'product.low_stock', productId: string, name: string, stockKg: string, thresholdKg: string }
 
 export async function fireWebhook(event: WebhookEvent): Promise<void> {
-  const url = process.env.WEBHOOK_URL
+  const { env } = process
+  const { WEBHOOK_URL: url } = env
   if (url === undefined || url === '') return
 
   try {

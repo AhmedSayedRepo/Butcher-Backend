@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import type { Product } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
@@ -14,7 +15,8 @@ const router = Router()
 // v2 replan (Phase B): optional `category` filter, e.g. GET /api/products?category=Beef
 // — additive, GET /api/products with no query still returns everything.
 router.get('/', asyncHandler(async (req, res) => {
-  const { category } = req.query
+  const { query } = req
+  const { category } = query
   const where = typeof category === 'string' && category !== '' ? { category } : {}
   const products = await prisma.product.findMany({ where, orderBy: { name: 'asc' } })
   res.json(products)
@@ -68,12 +70,37 @@ const UpdateProduct = z.object({
   reason: z.string().min(MIN_NAME_LENGTH).optional()
 })
 
+// Extracted from the PATCH handler below purely to keep its own cyclomatic
+// complexity under the lint threshold — same logic, just named and testable
+// on its own. Returns an error message if a reason was required but missing.
+function reasonRequiredError(stockChanged: boolean, reason: string | undefined): string | null {
+  if (stockChanged && reason === undefined) {
+    return 'A reason is required when changing stock directly (restock, correction, shrinkage, etc.)'
+  }
+  return null
+}
+
+// Same reasoning as reasonRequiredError above — extracted so the PATCH
+// handler's own complexity stays low, not because this needs to be reused.
+function notifyIfNowLowStock(stockChanged: boolean, product: Product): void {
+  if (stockChanged && isLowStock(product)) {
+    void fireWebhook({
+      type: 'product.low_stock',
+      productId: product.id,
+      name: product.name,
+      stockKg: product.stockKg.toString(),
+      thresholdKg: (product.lowStockAlertKg ?? '').toString()
+    })
+  }
+}
+
 router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  const { id: userId } = req.user
+  const { user } = req
+  const { id: userId } = user
 
   const { params } = req
   const { id } = params
@@ -94,10 +121,9 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
   const { reason, ...fields } = data
   const stockChanged = fields.stockKg !== undefined && fields.stockKg !== Number(existing.stockKg)
 
-  if (stockChanged && reason === undefined) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: 'A reason is required when changing stock directly (restock, correction, shrinkage, etc.)'
-    })
+  const reasonError = reasonRequiredError(stockChanged, reason)
+  if (reasonError !== null) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: reasonError })
     return
   }
 
@@ -108,7 +134,7 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
         // the boolean checks above), but TS can't see that correlation through
         // the destructured object — the reason-required check above already
         // guarantees `reason` is a string here too.
-        const nextStockKg = fields.stockKg
+        const { stockKg: nextStockKg } = fields
         if (nextStockKg !== undefined && reason !== undefined) {
           await tx.stockAdjustment.create({
             data: {
@@ -123,15 +149,7 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
       })
     : await prisma.product.update({ where: { id }, data: fields })
 
-  if (stockChanged && isLowStock(product)) {
-    void fireWebhook({
-      type: 'product.low_stock',
-      productId: product.id,
-      name: product.name,
-      stockKg: product.stockKg.toString(),
-      thresholdKg: (product.lowStockAlertKg ?? '').toString()
-    })
-  }
+  notifyIfNowLowStock(stockChanged, product)
 
   res.json(product)
 }))

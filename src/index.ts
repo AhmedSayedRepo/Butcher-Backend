@@ -15,6 +15,7 @@ import authRouter from './routes/auth.js'
 import usersRouter from './routes/users.js'
 import dismantleTemplatesRouter from './routes/dismantleTemplates.js'
 import dismantleEventsRouter from './routes/dismantleEvents.js'
+import whatsappWebhookRouter from './routes/whatsappWebhook.js'
 import { asyncHandler } from './lib/asyncHandler.js'
 import { HTTP_STATUS } from './lib/httpStatus.js'
 import { getErrorMessage } from './lib/errors.js'
@@ -41,7 +42,19 @@ app.use(helmet())
 // `console.log`), which is why the `no-console` rule elsewhere in this
 // codebase doesn't apply here — no extra stream plumbing needed.
 app.use(morgan('combined'))
-app.use(express.json({ limit: '1mb' }))
+// Phase I.2 (WhatsApp order intake): `verify` stashes the exact raw request
+// bytes on the request object before body-parser turns them into `req.body`.
+// The WhatsApp inbound webhook needs those raw bytes (not the re-serialized
+// JSON, which can differ in whitespace/key order) to check Meta's
+// `X-Hub-Signature-256` HMAC — see lib/whatsapp.ts. `Object.assign` is used
+// rather than a direct property write per this codebase's existing
+// no-param-reassign convention (see middleware/auth.ts).
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => {
+    Object.assign(req, { rawBody: buf })
+  }
+}))
 app.use(cookieParser())
 // Tech debt (ADR-002), now resolved: auth moved from a bearer token the
 // frontend stored in localStorage to an httpOnly cookie (see
@@ -73,6 +86,10 @@ app.use('/api/parse-order', parseOrder)
 app.use('/api/users', usersRouter)
 app.use('/api/dismantle-templates', dismantleTemplatesRouter)
 app.use('/api/dismantle-events', dismantleEventsRouter)
+// Phase I.2: public (no `auth` middleware) — Meta itself is the caller, and
+// the GET handshake / POST signature check inside this router are what
+// stand in for auth here (see routes/whatsappWebhook.ts).
+app.use('/webhooks/whatsapp', whatsappWebhookRouter)
 
 // Centralized error handler: asyncHandler forwards unexpected failures here
 // via `next(err)` instead of leaving them as unhandled promise rejections.

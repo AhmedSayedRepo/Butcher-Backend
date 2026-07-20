@@ -14,6 +14,14 @@ const router = Router()
 
 const MIN_ORDER_ITEMS = 1
 const INITIAL_TOTAL = 0
+const UNMATCHED_ITEM_PRICE = 0
+
+// `status as OrderStatus` was an unsafe assertion — `x in EnumObject` narrows
+// membership but not to the enum's own type. This is a real runtime type
+// guard instead, so callers get proper narrowing with no cast.
+function isOrderStatus(value: string): value is OrderStatus {
+  return Object.values(OrderStatus).some((v) => v === value)
+}
 
 const OrderItemSchema = z.object({
   productId: z.string().uuid(),
@@ -48,9 +56,10 @@ async function notifyIfLowStock(productIds: string[]): Promise<void> {
 // optional ?status=IN_PROGRESS filter, additive (no query param still
 // returns everything, same as before).
 router.get('/', auth, asyncHandler(async (req, res) => {
-  const { status } = req.query
-  const where = typeof status === 'string' && status in OrderStatus
-    ? { status: status as OrderStatus }
+  const { query } = req
+  const { status } = query
+  const where = typeof status === 'string' && isOrderStatus(status)
+    ? { status }
     : {}
   const orders = await prisma.order.findMany({
     where,
@@ -194,7 +203,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
 
   const total = items.reduce((sum, it) => {
     const p = productMap.get(it.productId)
-    return sum + (p === undefined ? 0 : Number(p.pricePerKg) * it.kg)
+    return sum + (p === undefined ? UNMATCHED_ITEM_PRICE : Number(p.pricePerKg) * it.kg)
   }, INITIAL_TOTAL)
 
   const draft = await prisma.$transaction(async (tx) => {
@@ -216,7 +225,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
           orderId: created.id,
           productId: it.productId,
           kg: it.kg,
-          price: (p === undefined ? 0 : Number(p.pricePerKg)) * it.kg
+          price: (p === undefined ? UNMATCHED_ITEM_PRICE : Number(p.pricePerKg)) * it.kg
         }
       })
     }))
@@ -323,7 +332,8 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     return
   }
   const { data } = parsed
-  const nextStatus = OrderStatus[data.status]
+  const { status: nextStatusKey } = data
+  const { [nextStatusKey]: nextStatus } = OrderStatus
 
   if (!PROMOTABLE_STATUSES.includes(nextStatus)) {
     res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Cannot set status to ${nextStatus} here` })

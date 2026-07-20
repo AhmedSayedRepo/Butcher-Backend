@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 
@@ -30,8 +31,33 @@ async function main() {
   }
 
   await seedDismantleTemplates()
+  await seedWhatsAppSystemUser()
 
   console.log('Seed completed. Admin:', email)
+}
+
+// v3 replan (Phase I.2 — WhatsApp order intake): Order.userId is a required
+// FK, but a WhatsApp-originated draft has no logged-in staff member driving
+// it. Rather than making Order.userId nullable (a wider schema change
+// touching every existing order), a single seeded "system" user is
+// attributed instead — same idea as a service account. Its password is a
+// random, never-communicated value: this account is never meant to log in
+// through /auth/login, only to exist as a valid userId to point the FK at.
+// role stays "cashier" (the least-privileged role) rather than "admin", in
+// case something ever did try to authenticate as it.
+async function seedWhatsAppSystemUser(): Promise<void> {
+  const email = process.env.WHATSAPP_SYSTEM_USER_EMAIL || 'whatsapp-bot@system.internal'
+  const existing = await prisma.user.findUnique({ where: { email } })
+  if (existing !== null) return
+
+  const unusablePassword = await bcrypt.hash(crypto.randomUUID(), 10)
+  await prisma.user.create({
+    data: {
+      email,
+      password: unusablePassword,
+      role: 'cashier'
+    }
+  })
 }
 
 // v2 replan, Phase B.5 — carcass dismantling templates (calf/sheep/goat).

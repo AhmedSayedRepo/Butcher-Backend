@@ -39,6 +39,8 @@ const CreateEventSchema = z.object({
 // "Auto-calculated fields" section: recorded weights stay the single source
 // of truth, so correcting an output later doesn't leave a stale derived
 // column anywhere to also fix.
+const ZERO = 0
+
 function withComputedFields<T extends {
   inputWeightKg: unknown
   outputs: Array<{ actualWeightKg: unknown }>
@@ -46,11 +48,11 @@ function withComputedFields<T extends {
   const inputWeightKg = Number(event.inputWeightKg)
   const outputs = event.outputs.map((o) => ({
     ...o,
-    contentPerKiloKg: inputWeightKg > 0 ? Number(o.actualWeightKg) / inputWeightKg : 0
+    contentPerKiloKg: inputWeightKg > ZERO ? Number(o.actualWeightKg) / inputWeightKg : ZERO
   }))
-  const totalOutputKg = outputs.reduce((sum, o) => sum + Number(o.actualWeightKg), 0)
+  const totalOutputKg = outputs.reduce((sum, o) => sum + Number(o.actualWeightKg), ZERO)
   const HUNDRED_PERCENT = 100
-  const wastePct = inputWeightKg > 0 ? ((inputWeightKg - totalOutputKg) / inputWeightKg) * HUNDRED_PERCENT : 0
+  const wastePct = inputWeightKg > ZERO ? ((inputWeightKg - totalOutputKg) / inputWeightKg) * HUNDRED_PERCENT : ZERO
   return { ...event, outputs, wastePct }
 }
 
@@ -84,7 +86,8 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  const { id: performedBy } = req.user
+  const { user } = req
+  const { id: performedBy } = user
 
   const parsed = CreateEventSchema.safeParse(req.body)
   if (!parsed.success) {
@@ -114,6 +117,14 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
       data: { templateId, sourceLabel, inputWeightKg, performedBy }
     })
 
+    // Deliberately sequential (not Promise.all), unlike the item loops in
+    // routes/orders.ts: two outputs from the same event can legitimately
+    // target the same existing `productId` (e.g. two cuts both stocked into
+    // a shared "trim" product), and the stock update below is a
+    // read-then-write (`Number(product.stockKg) + o.actualWeightKg`) — run
+    // concurrently, two such outputs could race and one's stock addition
+    // would be silently lost.
+    /* eslint-disable no-await-in-loop -- see comment above */
     for (const o of outputs) {
       let { productId } = o
       if (o.newProduct !== undefined) {
@@ -122,10 +133,11 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
             name: o.newProduct.name,
             unit: o.newProduct.unit,
             pricePerKg: o.newProduct.pricePerKg,
-            stockKg: 0
+            stockKg: ZERO
           }
         })
-        productId = newProduct.id
+        const { id: newProductId } = newProduct
+        productId = newProductId
       }
 
       await tx.dismantleEventOutput.create({
@@ -154,8 +166,9 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
         })
       }
     }
+    /* eslint-enable no-await-in-loop */
 
-    return tx.dismantleEvent.findUniqueOrThrow({
+    return await tx.dismantleEvent.findUniqueOrThrow({
       where: { id: created.id },
       include: { outputs: true, template: true }
     })

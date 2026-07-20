@@ -12,7 +12,8 @@ import { HTTP_STATUS } from '../lib/httpStatus.js'
 const router = Router()
 
 router.get('/', asyncHandler(async (req, res) => {
-  const { animalType } = req.query
+  const { query } = req
+  const { animalType } = query
   const where = typeof animalType === 'string' && animalType !== '' ? { animalType } : {}
   const templates = await prisma.dismantleTemplate.findMany({
     where,

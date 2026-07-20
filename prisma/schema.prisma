@@ -67,6 +67,13 @@ model Order {
   // v2 replan (Phase G — WhatsApp intake): "cashier" | "whatsapp". Default
   // matches every order created before this migration.
   source      String      @default("cashier")
+  // v3 replan (Phase I.2 — WhatsApp order intake): the raw inbound message
+  // text, kept verbatim alongside the parsed items so staff can review what
+  // the customer actually wrote (parsing is best-effort — see
+  // lib/parseOrderMessage.ts — and unmatched items never become OrderItem
+  // rows, so this is the only record of them). Null for every non-WhatsApp
+  // order.
+  customerMessage String?  @db.Text
   createdAt   DateTime    @default(now())
   userId      String
   user        User        @relation(fields: [userId], references: [id])
