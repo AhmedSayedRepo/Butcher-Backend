@@ -22,6 +22,23 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json(products)
 }))
 
+// v3 replan (Phase I.1 — barcode scanning). Separate small lookup endpoint
+// rather than overloading GET / with a barcode filter — this is a fast
+// single-item lookup fired on every scan (New Order page's barcode input),
+// not a list query. Placed before `/:id/adjustments` purely for readability;
+// there's no route-ordering conflict since this path segment (`by-barcode`)
+// never collides with a product `:id`.
+router.get('/by-barcode/:code', auth, asyncHandler(async (req, res) => {
+  const { params } = req
+  const { code } = params
+  const product = await prisma.product.findUnique({ where: { barcode: code } })
+  if (product === null) {
+    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'No product with that barcode' })
+    return
+  }
+  res.json(product)
+}))
+
 const MIN_NAME_LENGTH = 1
 
 const CreateProduct = z.object({
@@ -30,7 +47,12 @@ const CreateProduct = z.object({
   category: z.string().min(MIN_NAME_LENGTH).optional(),
   pricePerKg: z.number().positive(),
   stockKg: z.number().nonnegative(),
-  lowStockAlertKg: z.number().nonnegative().optional()
+  lowStockAlertKg: z.number().nonnegative().optional(),
+  // v3 replan (Phase I.1 — barcode scanning, ADR-008): optional, unique.
+  // Lookup-only in this phase — no barcode *generation* feature, since the
+  // v3 plan's open question 2 (self-printed vs. supplier-printed) was never
+  // answered; lookup-only is the strict subset that's correct either way.
+  barcode: z.string().min(MIN_NAME_LENGTH).optional()
 })
 
 // v2 replan (Phase B): creating/editing products is exactly what the
@@ -67,6 +89,7 @@ const UpdateProduct = z.object({
   pricePerKg: z.number().positive().optional(),
   stockKg: z.number().nonnegative().optional(),
   lowStockAlertKg: z.number().nonnegative().optional(),
+  barcode: z.string().min(MIN_NAME_LENGTH).optional(),
   reason: z.string().min(MIN_NAME_LENGTH).optional()
 })
 

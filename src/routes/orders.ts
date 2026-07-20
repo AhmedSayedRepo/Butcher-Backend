@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { OrderStatus } from '@prisma/client'
+import { OrderStatus, CashTransactionType } from '@prisma/client'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
@@ -9,12 +9,29 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
+import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom } from '../lib/idempotency.js'
 
 const router = Router()
 
 const MIN_ORDER_ITEMS = 1
 const INITIAL_TOTAL = 0
 const UNMATCHED_ITEM_PRICE = 0
+
+// v3 replan (Phase I — omnichannel intake). Extends the set of `source`
+// values the app understands — `source` stays a free-text column (not a DB
+// enum, per the v3 plan), so this is a zero-migration, zod-only change.
+// `cashier`/`whatsapp` already existed (v2/Phase G); `in_premise`/`social`/
+// `phone` are new this phase.
+const SOURCE_VALUES = ['cashier', 'whatsapp', 'in_premise', 'social', 'phone'] as const
+
+// v3 replan (Phase K — cash management, ADR-011). Auto-logs a matching
+// CashTransaction the moment an order becomes a real, stock-decremented sale
+// (direct POST / or POST /:id/promote) with paymentMethod "cash" — never at
+// draft-save time, since a draft hasn't actually happened yet. Runs inside
+// the *same* prisma.$transaction as the order write per the plan's
+// transactional-integrity rule, so the order and the cash-ledger entry
+// always succeed or fail together.
+const SALE_CATEGORY = 'sale'
 
 // `status as OrderStatus` was an unsafe assertion — `x in EnumObject` narrows
 // membership but not to the enum's own type. This is a real runtime type
@@ -30,6 +47,23 @@ const OrderItemSchema = z.object({
 
 const CreateOrderSchema = z.object({
   customer: z.string().optional(),
+  // v3 replan (Phase H — CRM): optional link to a real Customer record.
+  // The free-text `customer` field above is untouched — both can be set
+  // independently, nothing about the pre-v3 order flow changes.
+  customerId: z.string().uuid().optional(),
+  // v3 replan (Phase I.2/I.3 — social & phone intake, ADR-009). Verbatim DM
+  // text or call notes, staff-entered — same field Phase G's WhatsApp
+  // webhook already writes to directly for bot-created drafts; this is the
+  // human-entry path onto the same column.
+  customerMessage: z.string().optional(),
+  // v3 replan (Phase I.3 — phone delivery orders). Null/omitted for every
+  // other source.
+  deliveryAddress: z.string().optional(),
+  // v3 replan (Phase K — cash management). Defaults to "cash" so every
+  // pre-v3 order-creation call (no body change required) still gets a
+  // correct value.
+  paymentMethod: z.string().default('cash'),
+  source: z.enum(SOURCE_VALUES).optional(),
   items: z.array(OrderItemSchema).min(MIN_ORDER_ITEMS)
 })
 
@@ -69,12 +103,25 @@ router.get('/', auth, asyncHandler(async (req, res) => {
   res.json(orders)
 }))
 
+const CREATE_ORDER_ENDPOINT = 'POST /api/orders'
+
 router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  const { user } = req
+  const { user, headers } = req
+  const idempotencyKey = idempotencyKeyFrom(headers)
+
+  // v3 replan — idempotency guard (real gap flagged in
+  // Butcher-Project-Plan-v3.md): a barcode scanner double-firing or a
+  // cashier re-tapping "Submit" under time pressure could otherwise
+  // double-decrement stock and double-create an order.
+  const cached = await findIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey)
+  if (cached !== undefined) {
+    res.status(HTTP_STATUS.CREATED).json(cached)
+    return
+  }
 
   const parsed = CreateOrderSchema.safeParse(req.body)
   if (!parsed.success) {
@@ -83,7 +130,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
   }
 
   const { data } = parsed
-  const { customer, items } = data
+  const { customer, customerId, customerMessage, deliveryAddress, paymentMethod, source, items } = data
 
   const productIds = items.map((i) => i.productId)
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
@@ -126,6 +173,11 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
     const created = await tx.order.create({
       data: {
         customer,
+        customerId,
+        customerMessage,
+        deliveryAddress,
+        paymentMethod,
+        source,
         totalAmount: total,
         userId: user.id
       }
@@ -155,6 +207,15 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
       })
     }))
 
+    // v3 replan (Phase K, ADR-011): a real, stock-decremented cash sale logs
+    // itself into the drawer ledger in the same transaction — never a
+    // separate follow-up call that could fail independently.
+    if (paymentMethod === 'cash') {
+      await tx.cashTransaction.create({
+        data: { type: CashTransactionType.IN, category: SALE_CATEGORY, amount: total, userId: user.id, note: `Order ${created.id}` }
+      })
+    }
+
     return created
   })
 
@@ -166,6 +227,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
     totalAmount: total.toString()
   })
   void notifyIfLowStock(productIds)
+  await storeIdempotentResponse(CREATE_ORDER_ENDPOINT, idempotencyKey, JSON.parse(JSON.stringify(full)))
   res.status(HTTP_STATUS.CREATED).json(full)
 }))
 
@@ -175,12 +237,21 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
 // NOT validate stock sufficiency here (only that each productId is real) —
 // stock is re-checked at promote time, since it may have changed by then;
 // see the plan's Phase C section for why.
+const CREATE_DRAFT_ENDPOINT = 'POST /api/orders/draft'
+
 router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  const { user } = req
+  const { user, headers } = req
+  const idempotencyKey = idempotencyKeyFrom(headers)
+
+  const cached = await findIdempotentResponse(CREATE_DRAFT_ENDPOINT, idempotencyKey)
+  if (cached !== undefined) {
+    res.status(HTTP_STATUS.CREATED).json(cached)
+    return
+  }
 
   const parsed = CreateOrderSchema.safeParse(req.body)
   if (!parsed.success) {
@@ -188,7 +259,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
     return
   }
   const { data } = parsed
-  const { customer, items } = data
+  const { customer, customerId, customerMessage, deliveryAddress, paymentMethod, source, items } = data
 
   const productIds = items.map((i) => i.productId)
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
@@ -210,6 +281,11 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
     const created = await tx.order.create({
       data: {
         customer,
+        customerId,
+        customerMessage,
+        deliveryAddress,
+        paymentMethod,
+        source,
         totalAmount: total,
         userId: user.id,
         status: OrderStatus.DRAFT
@@ -233,20 +309,34 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
   })
 
   const full = await prisma.order.findUnique({ where: { id: draft.id }, include: { items: true } })
+  await storeIdempotentResponse(CREATE_DRAFT_ENDPOINT, idempotencyKey, JSON.parse(JSON.stringify(full)))
   res.status(HTTP_STATUS.CREATED).json(full)
 }))
 
 // v2 replan (Phase C): promotes a DRAFT order to CREATED — re-validates
 // stock (it may have changed since the draft was saved) and runs the same
 // stock-decrement transaction the direct-create path above uses.
+const PROMOTE_ORDER_ENDPOINT = 'POST /api/orders/:id/promote'
+
 router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
   }
-  const { user } = req
+  const { user, headers } = req
   const { params } = req
   const { id } = params
+  // Endpoint key includes the order id: a retried promote of order A must
+  // not replay order B's cached response if the two happened to share a
+  // client-generated Idempotency-Key (shouldn't happen with proper
+  // per-attempt UUIDs, but scoping by id costs nothing and removes the
+  // possibility entirely).
+  const idempotencyKey = idempotencyKeyFrom(headers)
+  const cached = await findIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey)
+  if (cached !== undefined) {
+    res.json(cached)
+    return
+  }
 
   const existing = await prisma.order.findUnique({ where: { id }, include: { items: true } })
   if (existing === null) {
@@ -289,6 +379,15 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
         data: { stockKg: Number(p.stockKg) - Number(it.kg) }
       })
     }))
+
+    // v3 replan (Phase K, ADR-011): promoting a draft is the moment it
+    // becomes a real, stock-decremented sale — same rule as the direct
+    // POST / path above, kept in sync deliberately (see SALE_CATEGORY).
+    if (existing.paymentMethod === 'cash') {
+      await tx.cashTransaction.create({
+        data: { type: CashTransactionType.IN, category: SALE_CATEGORY, amount: existing.totalAmount, userId: user.id, note: `Order ${id}` }
+      })
+    }
   })
 
   const full = await prisma.order.findUnique({ where: { id }, include: { items: true } })
@@ -299,6 +398,7 @@ router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => 
     totalAmount: existing.totalAmount.toString()
   })
   void notifyIfLowStock(productIds)
+  await storeIdempotentResponse(`${PROMOTE_ORDER_ENDPOINT}:${id}`, idempotencyKey, JSON.parse(JSON.stringify(full)))
   res.json(full)
 }))
 

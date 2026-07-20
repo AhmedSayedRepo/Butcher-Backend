@@ -26,6 +26,70 @@ model User {
   statusEvents      OrderStatusEvent[]
   stockAdjustments  StockAdjustment[]
   dismantleEvents   DismantleEvent[]
+  cashTransactions  CashTransaction[]
+}
+
+// v3 replan (Phase H — CRM). Deliberately minimal (ADR-013 / "Customer data
+// is minimal and deletable" in Butcher-Project-Plan-v3.md's best-practices
+// section) — no speculative marketing-CRM fields (campaigns/segments/tags).
+// `Order.customer` (free text) is untouched and still covers anonymous
+// walk-ins; `Order.customerId` is an optional link on top, so nothing about
+// today's order flow changes for orders that never reference a Customer.
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  phone     String?
+  notes     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+}
+
+// v3 replan (Phase K — cash management). Append-only ledger (ADR-011) — a
+// mistaken entry is corrected by inserting a reversing transaction, never by
+// UPDATE/DELETE on the original row, same as StockAdjustment/
+// OrderStatusEvent elsewhere in this schema.
+enum CashTransactionType {
+  IN
+  OUT
+}
+
+model CashTransaction {
+  id        String              @id @default(uuid())
+  type      CashTransactionType
+  category  String              // e.g. "sale" (auto-logged), "deposit", "supplier_payment", "petty_cash", "correction"
+  amount    Decimal             @db.Decimal(10,2)
+  note      String?
+  userId    String
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+// v3 replan (Phase J — pending-order alerting). Single-row config table:
+// "how long is too long for a pending order" is shop policy, not a
+// per-user preference, so this is one row, not User-scoped settings.
+model ShopSettings {
+  id                      String  @id @default(uuid())
+  pendingOrderAlertMinutes Int    @default(30)
+  alertSoundEnabled       Boolean @default(true)
+}
+
+// v3 replan — idempotency guard for order-creation and cash-transaction
+// endpoints (the plan's "Idempotency — a real gap, not a solved problem"
+// finding: nothing in this app previously protected against a duplicate
+// submission from a double-click or a retried network request). A repeat
+// request carrying the same client-generated key returns the stored
+// response instead of re-executing the write.
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  key          String
+  endpoint     String
+  responseBody Json
+  createdAt    DateTime @default(now())
+
+  @@unique([key, endpoint])
 }
 
 model Product {
@@ -38,6 +102,11 @@ model Product {
   // every existing product row stays valid with no backfill required.
   category        String?
   lowStockAlertKg Decimal? @db.Decimal(10,3)
+  // v3 replan (Phase I.1 — barcode scanning). Optional/unique so existing
+  // products stay valid unbackfilled; a scanner is a keyboard-emulation
+  // device feeding a lookup against this field (ADR-008), not a device
+  // integration.
+  barcode         String?  @unique
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -74,6 +143,24 @@ model Order {
   // rows, so this is the only record of them). Null for every non-WhatsApp
   // order.
   customerMessage String?  @db.Text
+  // v3 replan (Phase H — CRM). Optional link on top of the existing free-text
+  // `customer` field — nothing about today's order flow changes for orders
+  // that never reference a real Customer record. SetNull on delete so
+  // deleting a Customer (ADR-013) never cascades into deleting order/
+  // financial history, only de-links it from the removed person.
+  customerId      String?
+  customerRecord  Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // v3 replan (Phase I.3 — phone delivery orders). Null for every other source.
+  deliveryAddress String?  @db.Text
+  // v3 replan (Phase K — cash management): which payment rail this order
+  // used. Free-text default "cash" rather than a DB enum, matching how
+  // `source` is already modeled — extending the set of understood values
+  // later is a zero-migration zod change. Only paymentMethod === "cash"
+  // orders auto-log a CashTransaction (ADR-011); other values are recorded
+  // but not yet reconciled against a rail-specific ledger (out of scope
+  // until non-cash payment methods are confirmed in use — see v3 plan's
+  // open question 4).
+  paymentMethod   String   @default("cash")
   createdAt   DateTime    @default(now())
   userId      String
   user        User        @relation(fields: [userId], references: [id])

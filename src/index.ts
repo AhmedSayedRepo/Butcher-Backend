@@ -16,6 +16,9 @@ import usersRouter from './routes/users.js'
 import dismantleTemplatesRouter from './routes/dismantleTemplates.js'
 import dismantleEventsRouter from './routes/dismantleEvents.js'
 import whatsappWebhookRouter from './routes/whatsappWebhook.js'
+import customersRouter from './routes/customers.js'
+import cashTransactionsRouter from './routes/cashTransactions.js'
+import shopSettingsRouter from './routes/shopSettings.js'
 import { asyncHandler } from './lib/asyncHandler.js'
 import { HTTP_STATUS } from './lib/httpStatus.js'
 import { getErrorMessage } from './lib/errors.js'
@@ -86,6 +89,11 @@ app.use('/api/parse-order', parseOrder)
 app.use('/api/users', usersRouter)
 app.use('/api/dismantle-templates', dismantleTemplatesRouter)
 app.use('/api/dismantle-events', dismantleEventsRouter)
+// v3 replan: Phase H (CRM), Phase K (cash management), Phase J (shop-wide
+// alert settings) — see Butcher-Project-Plan-v3.md and ADRs.md ADR-008/013.
+app.use('/api/customers', customersRouter)
+app.use('/api/cash-transactions', cashTransactionsRouter)
+app.use('/api/shop-settings', shopSettingsRouter)
 // Phase I.2: public (no `auth` middleware) — Meta itself is the caller, and
 // the GET handshake / POST signature check inside this router are what
 // stand in for auth here (see routes/whatsappWebhook.ts).

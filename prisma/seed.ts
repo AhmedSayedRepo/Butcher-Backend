@@ -32,8 +32,20 @@ async function main() {
 
   await seedDismantleTemplates()
   await seedWhatsAppSystemUser()
+  await seedShopSettings()
 
   console.log('Seed completed. Admin:', email)
+}
+
+// v3 replan (Phase J — pending-order alerting): ShopSettings is a
+// single-row config table (shop-wide policy, not per-user), so seeding just
+// ensures exactly one row exists with sane defaults — same "lazily create
+// the singleton" shape the GET /api/shop-settings route also implements for
+// databases that skip the seed script entirely.
+async function seedShopSettings(): Promise<void> {
+  const existing = await prisma.shopSettings.count()
+  if (existing > 0) return
+  await prisma.shopSettings.create({ data: {} })
 }
 
 // v3 replan (Phase I.2 — WhatsApp order intake): Order.userId is a required

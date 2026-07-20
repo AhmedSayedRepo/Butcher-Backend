@@ -11,7 +11,13 @@ export const CAPS = [
   'manage_users',
   'manage_inventory',
   'manage_orders',
-  'dismantle_carcass'
+  'dismantle_carcass',
+  // v3 replan (Phase K — cash management, ADR-012): deliberately its own
+  // capability rather than folded into `manage_orders` — handling money is a
+  // materially different trust level than taking an order, so a cashier who
+  // can ring up a sale shouldn't automatically be able to log arbitrary cash
+  // in/out entries or view drawer reports.
+  'manage_cash'
 ] as const
 export type Cap = (typeof CAPS)[number]
 
@@ -49,8 +55,8 @@ export function roleRank(role: string): number {
 // see Phase E in the plan for the cashier module's own role-gating.
 export const ROLE_DEFAULT_CAPS: Record<Role, readonly Cap[]> = {
   cashier: [],
-  manager: ['manage_inventory', 'manage_orders', 'dismantle_carcass'],
-  admin: ['manage_users', 'manage_inventory', 'manage_orders', 'dismantle_carcass']
+  manager: ['manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash'],
+  admin: ['manage_users', 'manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash']
 }
 
 export function effectiveCaps(role: string, caps: unknown): Cap[] {

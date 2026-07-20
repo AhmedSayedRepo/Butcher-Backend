@@ -94,7 +94,16 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
 }))
 
 router.post('/logout', (_req, res) => {
-  res.clearCookie(AUTH_COOKIE_NAME, { path: '/' })
+  // Bug fix: clearCookie's options must match the ones used in the original
+  // res.cookie() call (minus maxAge) or the browser won't recognize it as
+  // the same cookie and silently keeps the old one — this is documented
+  // Express behavior, not a caching/deploy issue. Was previously just
+  // `{ path: '/' }`, which omitted `secure`/`sameSite`; in production the
+  // login cookie is set with `sameSite: 'none', secure: true`, so the
+  // mismatched clear request was ignored by the browser and the auth cookie
+  // never actually got deleted on logout — the user stayed logged in.
+  const { httpOnly, secure, sameSite, path } = cookieOptions()
+  res.clearCookie(AUTH_COOKIE_NAME, { httpOnly, secure, sameSite, path })
   res.status(HTTP_STATUS.OK).json({ ok: true })
 })
 
