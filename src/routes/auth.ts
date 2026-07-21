@@ -14,6 +14,7 @@ import { createPasswordResetToken, findValidToken, invalidateOtherTokens } from 
 import { sendPasswordResetEmail } from '../lib/email.js'
 import { frontendUrl } from '../lib/frontendUrl.js'
 import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
+import { cookieOptions, sessionExpiresIn } from '../lib/session.js'
 
 const router = Router()
 
@@ -25,12 +26,13 @@ const MIN_FIELD_LENGTH = 1
 // eslint-config-love's config — confirmed by a real lint run flagging the
 // eslint-disable pair that used to wrap this block as unused.
 const MILLISECONDS_PER_SECOND = 1000
-const SECONDS_PER_DAY = 86400
-const COOKIE_MAX_AGE_DAYS = 7
 const SECONDS_PER_MINUTE = 60
 const LOGIN_WINDOW_MINUTES = 15
 const LOGIN_MAX_ATTEMPTS_PER_WINDOW = 10
-const COOKIE_MAX_AGE_MS = COOKIE_MAX_AGE_DAYS * SECONDS_PER_DAY * MILLISECONDS_PER_SECOND
+
+// Session length moved to lib/session.ts (security audit 2026-07-21). It was a
+// hardcoded 7 days here; it's now ~12 hours with sliding renewal, so an active
+// user is never logged out mid-shift while an idle one expires the same day.
 
 // Phase 5 hardening: /auth/login had no protection against credential
 // stuffing / brute force — anyone could hammer it as fast as the network
@@ -50,22 +52,9 @@ const loginLimiter = rateLimit({
 // Cross-site cookies (frontend and backend on different domains in
 // production, e.g. Vercel + Railway) require SameSite=None + Secure; same-site
 // local dev (both on localhost, different ports) works fine with Lax.
-function cookieOptions(): {
-  httpOnly: true
-  secure: boolean
-  sameSite: 'none' | 'lax'
-  maxAge: number
-  path: string
-} {
-  const isProd = process.env.NODE_ENV === 'production'
-  return {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? 'none' : 'lax',
-    maxAge: COOKIE_MAX_AGE_MS,
-    path: '/'
-  }
-}
+// cookieOptions moved to lib/session.ts — the sliding-renewal path in
+// middleware/auth.ts needs the identical options, and two copies of a cookie's
+// flags is exactly how the logout bug (see below) happened the first time.
 
 const LoginSchema = z.object({
   email: z.string().min(MIN_FIELD_LENGTH),
@@ -102,7 +91,11 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
     return
   }
 
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, requireEnv('JWT_SECRET'), { expiresIn: '7d' })
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role },
+    requireEnv('JWT_SECRET'),
+    { expiresIn: sessionExpiresIn() }
+  )
   res.cookie(AUTH_COOKIE_NAME, token, cookieOptions())
   res.json({ user: { id: user.id, email: user.email, role: user.role } })
 }))

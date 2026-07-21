@@ -18,6 +18,8 @@
 /* eslint-disable no-console -- CLI script; console is the output device */
 import { isValidSlug, subdomainMismatch, isBlockedByBilling, requestedSlug } from '../src/middleware/tenant.js'
 import { buildOriginChecker } from '../src/lib/corsOrigin.js'
+import { sessionHours, sessionExpiresIn, shouldRenew } from '../src/lib/session.js'
+import { samePhone } from '../src/lib/phoneMatch.js'
 
 let pass = 0, fail = 0
 function t(name: string, got: unknown, want: unknown) {
@@ -104,6 +106,59 @@ for (const attack of slugAttacks) {
 // query — so a payload in it is inert, and simply fails to match a real slug.
 t('org header: payload stays a plain string', requestedSlug("' OR 1=1 --"), "' or 1=1 --")
 t('org header: payload never matches a real org', subdomainMismatch("' OR 1=1 --", 'alaqsa'), true)
+
+
+// ── Session lifetime (security audit follow-up) ──────────────────────────────
+console.log('')
+
+delete process.env.SESSION_HOURS
+t('session: defaults to 12h', sessionHours(), 12)
+process.env.SESSION_HOURS = '8'
+t('session: env override honoured', sessionHours(), 8)
+process.env.SESSION_HOURS = '0'
+t('session: zero falls back to default', sessionHours(), 12)
+process.env.SESSION_HOURS = 'abc'
+t('session: garbage falls back to default', sessionHours(), 12)
+process.env.SESSION_HOURS = '99999'
+t('session: clamped to one week', sessionHours(), 168)
+process.env.SESSION_HOURS = '0.25'
+t('session: clamped up to 1h minimum', sessionHours(), 1)
+delete process.env.SESSION_HOURS
+t('session: expiresIn format', sessionExpiresIn(), '12h')
+
+// Sliding renewal. `iat`/`exp` are seconds since epoch.
+const nowSec = Math.floor(Date.now() / 1000)
+const HOUR = 3600
+t('renew: fresh token is not renewed',
+  shouldRenew(nowSec, nowSec + 12 * HOUR), false)
+t('renew: past halfway is renewed',
+  shouldRenew(nowSec - 7 * HOUR, nowSec + 5 * HOUR), true)
+t('renew: exactly at issue is not renewed',
+  shouldRenew(nowSec, nowSec + HOUR), false)
+t('renew: missing claims are not renewed',
+  shouldRenew(undefined, undefined), false)
+t('renew: nonsense lifetime is not renewed',
+  shouldRenew(nowSec, nowSec - HOUR), false)
+
+
+// ── Phone matching (v3.2 — link a WhatsApp order to a known customer) ────────
+console.log('')
+
+// The whole point: WhatsApp sends E.164 without a plus, shops type whatever
+// they were told. These are all the same line.
+const waNumber = '201018185200'
+t('phone: matches national form with leading zero', samePhone(waNumber, '01018185200'), true)
+t('phone: matches spaced form', samePhone(waNumber, '0101 818 5200'), true)
+t('phone: matches +country form', samePhone(waNumber, '+20 101 818 5200'), true)
+t('phone: matches dashed form', samePhone(waNumber, '010-1818-5200'), true)
+t('phone: matches itself', samePhone(waNumber, waNumber), true)
+
+t('phone: different number does not match', samePhone(waNumber, '01018185201'), false)
+t('phone: too short to compare', samePhone(waNumber, '5200'), false)
+t('phone: null never matches', samePhone(waNumber, null), false)
+t('phone: empty never matches', samePhone(waNumber, ''), false)
+t('phone: two nulls do not match', samePhone(null, null), false)
+t('phone: letters stripped, still matches', samePhone(waNumber, 'tel: 0101-818-5200'), true)
 
 console.log(`\n${pass}/${pass + fail} passed`)
 if (fail > 0) process.exitCode = 1

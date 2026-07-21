@@ -440,6 +440,17 @@ model Order {
   // financial history, only de-links it from the removed person.
   customerId      String?
   customerRecord  Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // v3.2 — the parts of an inbound message that matched NO product.
+  //
+  // Before this they existed only inside `customerMessage`, so a WhatsApp
+  // order for "2kg beef and some liver" produced a tidy-looking draft with one
+  // line and no indication that half the request was missing. Staff had to
+  // re-read the raw text to notice — and the card gave them no reason to.
+  //
+  // Newline-separated raw fragments, not JSON: they're the customer's own
+  // words, only ever displayed, never parsed again.
+  unmatchedItems String? @db.Text
+
   // v3 replan (Phase I.3 — phone delivery orders). Null for every other source.
   deliveryAddress String?  @db.Text
   // v3 replan (Phase K — cash management): which payment rail this order

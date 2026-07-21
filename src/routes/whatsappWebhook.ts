@@ -3,6 +3,7 @@ import type { Request } from 'express'
 import { OrderStatus } from '@prisma/client'
 import { prisma, prismaUnscoped } from '../lib/db.js'
 import { runInTenantContext } from '../lib/tenantContext.js'
+import { phoneKey, samePhone } from '../lib/phoneMatch.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { parseOrderMessage } from '../lib/parseOrderMessage.js'
@@ -151,6 +152,33 @@ async function getSystemUser(): Promise<{ id: string, organizationId: string | n
   return user
 }
 
+/**
+ * The id of an existing customer whose phone matches this WhatsApp number, or
+ * null. Never creates one — see the note at the call site.
+ *
+ * Compares in JS rather than in the query because stored numbers are
+ * hand-typed with spaces, dashes and inconsistent country codes, so no
+ * `contains`/`endsWith` clause matches reliably. Only `{ id, phone }` is
+ * fetched, and this runs inside the tenant context so it only ever sees this
+ * shop's customers — a few hundred rows for a butcher, which is well within
+ * "just compare them".
+ *
+ * If a shop ever has tens of thousands of customers this wants a normalised
+ * `phoneKey` column with an index. Noting the threshold rather than
+ * pre-building for a scale that may never arrive.
+ */
+async function findCustomerByPhone(fromPhone: string): Promise<{ id: string, name: string } | null> {
+  const key = phoneKey(fromPhone)
+  if (key === null) return null
+
+  const candidates = await prisma.customer.findMany({
+    where: { phone: { not: null } },
+    select: { id: true, name: true, phone: true }
+  })
+  const hit = candidates.find(c => samePhone(c.phone, fromPhone))
+  return hit === undefined ? null : { id: hit.id, name: hit.name }
+}
+
 async function handleInboundOrderMessage(fromPhone: string, text: string, contactName: string | undefined): Promise<void> {
   const { id: userId, organizationId } = await getSystemUser()
 
@@ -179,6 +207,23 @@ async function createDraftFromMessage({ fromPhone, text, contactName, userId }: 
     (i): i is typeof i & { productId: string, pricePerKg: string } => i.productId !== null && i.pricePerKg !== null
   )
   const total = matched.reduce((sum, it) => sum + Number(it.pricePerKg) * it.requested_kg, INITIAL_TOTAL)
+
+  // v3.2: what the customer asked for that we couldn't price. These used to
+  // vanish into `customerMessage` — an order for "2kg beef and some liver"
+  // became a tidy one-line draft with no sign the liver was dropped. Stored
+  // separately so the card can say so instead of relying on staff re-reading
+  // the raw message.
+  const unmatched = items
+    .filter(i => i.productId === null)
+    .map(i => `${i.requested_kg}kg ${i.product_name}`)
+  const unmatchedItems = unmatched.length === NO_MATCHES ? null : unmatched.join('\n')
+
+  // v3.2: attach the order to a customer we already know, by phone.
+  //
+  // Deliberately only LINKS an existing customer — it never creates one. A
+  // stranger messaging once shouldn't silently populate the customer list, and
+  // whether someone is a customer is a judgement staff make, not a webhook.
+  const known = await findCustomerByPhone(fromPhone)
   // Same draft-creation shape as POST /api/orders/draft (Phase C): no stock
   // decrement yet, stock gets re-checked when staff promote it from the
   // pending-orders dashboard. Unmatched items never become OrderItem rows
@@ -187,12 +232,17 @@ async function createDraftFromMessage({ fromPhone, text, contactName, userId }: 
   await prisma.$transaction(async (tx) => {
     const created = await tx.order.create({
       data: {
-        customer: contactName ?? fromPhone,
+        // The name the shop knows them by wins over the WhatsApp profile
+        // name — staff recognise "Umm Ahmed" from their own records, not
+        // whatever the customer set on their phone.
+        customer: known?.name ?? contactName ?? fromPhone,
         totalAmount: total,
         userId,
         status: OrderStatus.DRAFT,
         source: 'whatsapp',
-        customerMessage: text
+        customerMessage: text,
+        unmatchedItems,
+        customerId: known?.id ?? null
       }
     })
     await tx.orderStatusEvent.create({

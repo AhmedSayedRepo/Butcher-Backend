@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import { prismaUnscoped } from '../lib/db.js'
 import { runInTenantContext } from '../lib/tenantContext.js'
 import { ORG_SLUG_HEADER, requestedSlug, subdomainMismatch, isBlockedByBilling } from './tenant.js'
+import { AUTH_COOKIE_NAME, renewSessionCookie, shouldRenew } from '../lib/session.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
@@ -14,7 +15,11 @@ const BEARER_PREFIX = 'Bearer '
 // XSS token theft) and the Authorization header is kept as a fallback so
 // non-browser API clients (e.g. curl, Postman, future mobile clients) still
 // work without needing cookie support.
-export const AUTH_COOKIE_NAME = 'butcher_token'
+// Defined in lib/session.ts and re-exported here, so the existing
+// `import { AUTH_COOKIE_NAME } from '../middleware/auth.js'` call sites keep
+// working. One definition: the cookie's name and its flags must never drift
+// apart, which is how the logout bug happened.
+export { AUTH_COOKIE_NAME }
 
 export interface AuthRequest extends Request {
   user?: {
@@ -32,6 +37,9 @@ interface AuthTokenPayload {
   id: string
   email: string
   role: string
+  /** Standard JWT claims, present on every token we issue. */
+  iat?: number
+  exp?: number
 }
 
 function isAuthTokenPayload(payload: unknown): payload is AuthTokenPayload {
@@ -180,6 +188,18 @@ export function auth(req: AuthRequest, res: Response, next: NextFunction): void 
       }
 
       Object.assign(req, { user: { id, email, role, organizationId, isSuperAdmin } })
+
+      // Sliding renewal (security audit 2026-07-21). Sessions are now ~12
+      // hours rather than 7 days, which would log a cashier out mid-shift —
+      // and staff work around bad security by writing the password on the
+      // till. So an actively-used session is silently extended once it passes
+      // halfway, while an idle one still expires on schedule.
+      //
+      // Only past halfway, not on every request: otherwise every response on a
+      // polling dashboard carries a Set-Cookie header for no benefit.
+      if (shouldRenew(payload.iat, payload.exp)) {
+        renewSessionCookie(res, { id, email, role })
+      }
 
       // Everything downstream — every route handler, every helper they call,
       // every promise those await — runs inside this context, which is what
