@@ -41,6 +41,14 @@ t('header: absent', requestedSlug(undefined), null)
 t('header: blank', requestedSlug('   '), null)
 t('header: lowercased', requestedSlug('AlAqsa'), 'alaqsa')
 
+// The mismatch check is inert until a wildcard domain is configured. These
+// two blocks are the regression guard for the production outage: a bogus slug
+// from a client bug must not be able to refuse every request on a deployment
+// that isn't using subdomain routing at all.
+delete process.env.CORS_WILDCARD_DOMAIN
+t('mismatch: inert without a wildcard domain', subdomainMismatch('anything-bogus', 'alaqsa'), false)
+
+process.env.CORS_WILDCARD_DOMAIN = 'butchercashier.com'
 t('mismatch: no header passes', subdomainMismatch(null, 'alaqsa'), false)
 t('mismatch: same passes', subdomainMismatch('alaqsa', 'alaqsa'), false)
 t('mismatch: different blocked', subdomainMismatch('almadina', 'alaqsa'), true)

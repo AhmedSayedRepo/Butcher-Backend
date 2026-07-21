@@ -52,13 +52,33 @@ export function requestedSlug(headerValue: string | string[] | undefined): strin
  * True when the caller is signed into a different organization than the
  * subdomain names.
  *
- * A missing header means "no opinion" and passes. That isn't a hole — it's
- * what keeps the current single-host deployment
- * (`butcher-frontend-eight.vercel.app`, no subdomain) working unchanged, and
- * the session still decides the data either way.
+ * A missing header means "no opinion" and passes — that's what keeps a
+ * single-host deployment working unchanged.
+ *
+ * **The check is inert unless `CORS_WILDCARD_DOMAIN` is set.** That variable is
+ * what says "this deployment routes shops by subdomain"; without it, subdomain
+ * routing isn't in use and a slug header can only be noise.
+ *
+ * That guard exists because the alternative failed in production. A frontend
+ * bug sent a bogus slug (it read the first label of
+ * `butcher-frontend-eight.vercel.app`), no organization matched it, and this
+ * function refused **every non-super-admin request** — the entire staff of the
+ * live shop, locked out by a client-side heuristic. A security check that a
+ * client bug can turn into a total outage is too sharp an edge to leave.
+ *
+ * Note the guard doesn't weaken the property that matters: a user of shop A
+ * pointing at shop B's subdomain is still refused, because that scenario only
+ * exists on a deployment where subdomain routing is switched on.
  */
 export function subdomainMismatch(requested: string | null, actualSlug: string | null): boolean {
+  if (!isSubdomainRoutingEnabled()) return false
   return requested !== null && actualSlug !== null && requested !== actualSlug
+}
+
+/** Subdomain routing is live only once a wildcard domain is configured. */
+export function isSubdomainRoutingEnabled(): boolean {
+  const { env } = process
+  return (env.CORS_WILDCARD_DOMAIN?.trim() ?? '') !== ''
 }
 
 // Writes are refused for a suspended organization; reads are not.
