@@ -19,18 +19,19 @@ const router = Router()
 // PATCH is admin-only, same tier as user management — shop-wide policy
 // changes, not a day-to-day cashier/manager action.
 
-// v3.1 follow-up 9 (ADR-016): the raw settings row has
-// `smtpAppPasswordEncrypted` (AES-256-GCM ciphertext) — this is never sent
-// to the client, not even as ciphertext (no reason to hand it out at all).
-// `smtpAppPasswordSet` tells the UI whether a password is configured
-// (server- or env-var-sourced) without revealing it, same "write-only
-// secret field" pattern used by e.g. Stripe/GitHub API-key settings pages.
-function toClientSettings<T extends { smtpAppPasswordEncrypted: string | null }>(settings: T): Omit<T, 'smtpAppPasswordEncrypted'> & { smtpAppPasswordSet: boolean } {
-  const { smtpAppPasswordEncrypted, ...rest } = settings
+// v3.1 follow-up 9 (ADR-016), field names updated by ADR-017 (Brevo
+// replaced Gmail SMTP): the raw settings row has `brevoApiKeyEncrypted`
+// (AES-256-GCM ciphertext) — this is never sent to the client, not even as
+// ciphertext (no reason to hand it out at all). `brevoApiKeySet` tells the
+// UI whether a key is configured (server- or env-var-sourced) without
+// revealing it, same "write-only secret field" pattern used by e.g.
+// Stripe/GitHub API-key settings pages.
+function toClientSettings<T extends { brevoApiKeyEncrypted: string | null }>(settings: T): Omit<T, 'brevoApiKeyEncrypted'> & { brevoApiKeySet: boolean } {
+  const { brevoApiKeyEncrypted, ...rest } = settings
   const { env } = process
-  const { SMTP_APP_PASSWORD: envPass } = env
-  const smtpAppPasswordSet = (smtpAppPasswordEncrypted !== null && smtpAppPasswordEncrypted !== '') || (envPass !== undefined && envPass !== '')
-  return { ...rest, smtpAppPasswordSet }
+  const { BREVO_API_KEY: envKey } = env
+  const brevoApiKeySet = (brevoApiKeyEncrypted !== null && brevoApiKeyEncrypted !== '') || (envKey !== undefined && envKey !== '')
+  return { ...rest, brevoApiKeySet }
 }
 
 router.get('/', auth, asyncHandler(async (_req, res) => {
@@ -46,18 +47,18 @@ const MIN_MAIL_SENDER_NAME_LENGTH = 1
 // added alongside the existing Phase J fields — same single-row shop-policy
 // table, same admin-only PATCH gate.
 //
-// v3.1 follow-up 9 (ADR-016): smtpUser/smtpAppPassword are both plain
-// `z.string()` (not `.min(1)`) so an explicit empty string means "clear
-// this field" — distinct from omitting the key entirely, which means
-// "leave it as-is". See the PATCH handler below for how that distinction
-// is used.
+// v3.1 follow-up 9 (ADR-016), renamed by ADR-017: brevoSenderEmail/
+// brevoApiKey are both plain `z.string()` (not `.min(1)`) so an explicit
+// empty string means "clear this field" — distinct from omitting the key
+// entirely, which means "leave it as-is". See the PATCH handler below for
+// how that distinction is used.
 const UpdateShopSettingsSchema = z.object({
   pendingOrderAlertMinutes: z.number().int().min(MIN_ALERT_MINUTES).optional(),
   alertSoundEnabled: z.boolean().optional(),
   defaultLowStockThresholdKg: z.number().gt(MIN_LOW_STOCK_THRESHOLD_KG).optional(),
   mailSenderName: z.string().min(MIN_MAIL_SENDER_NAME_LENGTH).optional(),
-  smtpUser: z.string().optional(),
-  smtpAppPassword: z.string().optional()
+  brevoSenderEmail: z.string().optional(),
+  brevoApiKey: z.string().optional()
 })
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
@@ -68,11 +69,11 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
   }
   const current = await getOrCreateSettings()
   const { data } = parsed
-  const { smtpUser, smtpAppPassword, ...rest } = data
+  const { brevoSenderEmail, brevoApiKey, ...rest } = data
 
-  if (smtpAppPassword !== undefined && smtpAppPassword !== '' && !isEncryptionConfigured()) {
+  if (brevoApiKey !== undefined && brevoApiKey !== '' && !isEncryptionConfigured()) {
     res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: 'SETTINGS_ENCRYPTION_KEY is not configured on the server, so a Gmail app password can\'t be saved here yet. Ask whoever deploys this app to set that env var, or continue using SMTP_APP_PASSWORD as an env var for now.'
+      error: 'SETTINGS_ENCRYPTION_KEY is not configured on the server, so a Brevo API key can\'t be saved here yet. Ask whoever deploys this app to set that env var, or continue using BREVO_API_KEY as an env var for now.'
     })
     return
   }
@@ -81,8 +82,8 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
     where: { id: current.id },
     data: {
       ...rest,
-      ...(smtpUser === undefined ? {} : { smtpUser: smtpUser === '' ? null : smtpUser }),
-      ...(smtpAppPassword === undefined ? {} : { smtpAppPasswordEncrypted: smtpAppPassword === '' ? null : encryptSecret(smtpAppPassword) })
+      ...(brevoSenderEmail === undefined ? {} : { brevoSenderEmail: brevoSenderEmail === '' ? null : brevoSenderEmail }),
+      ...(brevoApiKey === undefined ? {} : { brevoApiKeyEncrypted: brevoApiKey === '' ? null : encryptSecret(brevoApiKey) })
     }
   })
   res.json(toClientSettings(updated))

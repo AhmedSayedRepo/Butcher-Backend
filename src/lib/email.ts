@@ -1,5 +1,3 @@
-import dns from 'node:dns'
-import nodemailer from 'nodemailer'
 import { getOrCreateSettings } from './shopSettings.js'
 import { decryptSecret } from './encryption.js'
 import { getErrorMessage } from './errors.js'
@@ -15,141 +13,103 @@ import { getErrorMessage } from './errors.js'
 //
 // v3.1 follow-up 4: originally sent via Resend's HTTP API, but Resend
 // refuses to deliver anywhere except the account owner's own inbox until a
-// custom domain is verified — and verifying a domain costs money the shop
-// doesn't want to spend on this yet. Switched to plain Gmail SMTP via
-// nodemailer instead: free, no domain needed, delivers to any recipient
-// (subject to Gmail's own ~500/day sending cap, far more than a small
-// shop's invite volume). Requires a Google Account with 2-Step
-// Verification enabled and an "app password" generated for it — see
-// .env.example for the exact steps.
+// custom domain is verified. Switched to plain Gmail SMTP via nodemailer.
 //
-// v3.1 follow-up 9 (ADR-016): the Gmail address/app password can now also
-// be set from /settings (ShopSettings.smtpUser/smtpAppPasswordEncrypted)
-// instead of only env vars, so an admin can rotate them without touching
-// Render. DB values win when present; SMTP_USER/SMTP_APP_PASSWORD env vars
-// remain the fallback for a deployment that hasn't configured this yet.
-// Because credentials can now change at runtime (not just at process
-// start), the transporter is no longer cached as a module-level singleton
-// — it's rebuilt on every call instead. That's cheap: constructing a
-// nodemailer transport is pure config, no network I/O (it only connects
-// when `sendMail` is actually called), so this costs nothing real and
-// guarantees a settings change takes effect on the very next email.
-interface SmtpCredentials { user: string, pass: string }
+// v3.1 follow-up 9 (ADR-016): the Gmail address/app password became
+// configurable from /settings (encrypted at rest) instead of only env vars.
+//
+// v3.1 follow-ups 10/11/12/14: a series of fixes chasing an admin-invite
+// email that wouldn't send — bounded SMTP timeouts (was hanging the whole
+// request for up to 2 minutes), catching+logging the real error (was
+// silently swallowed), `dns.setDefaultResultOrder('ipv4first')` (didn't
+// help — nodemailer resolves DNS itself, bypassing that setting), then
+// resolving Gmail's IPv4 address ourselves and handing nodemailer the
+// literal IP (fixed the ENETUNREACH, but not the send itself).
+//
+// ADR-017: all of that turned out to be chasing the wrong layer. Once the
+// IPv6 issue was gone, every attempt still failed with a bare "Connection
+// timeout" — confirmed via Render's own changelog
+// (render.com/changelog/free-web-services-will-no-longer-allow-outbound-traffic-to-smtp-ports)
+// that free Render web services block ALL outbound traffic to SMTP ports
+// (25, 465, 587) as an anti-spam measure. No application-level fix (DNS,
+// timeouts, IPv4 pinning) can work around a platform firewall — SMTP from
+// this deployment was never going to work without a paid Render plan.
+// Switched to Brevo's HTTP transactional email API instead: it sends over
+// plain HTTPS (port 443, never blocked), free tier covers 300 emails/day
+// (far more than this shop's invite/reset volume), and — unlike Resend —
+// doesn't require a verified custom domain to deliver to arbitrary
+// recipients, only a single verified sender email address.
+interface BrevoCredentials { senderEmail: string, apiKey: string }
 
-async function getSmtpCredentials(): Promise<SmtpCredentials | null> {
+async function getBrevoCredentials(): Promise<BrevoCredentials | null> {
   const { env } = process
-  const { SMTP_USER: envUser, SMTP_APP_PASSWORD: envPass } = env
+  const { BREVO_SENDER_EMAIL: envSender, BREVO_API_KEY: envKey } = env
   const settings = await getOrCreateSettings()
 
-  const user = (settings.smtpUser !== null && settings.smtpUser !== '') ? settings.smtpUser : envUser
-  if (user === undefined || user === '') return null
+  const senderEmail = (settings.brevoSenderEmail !== null && settings.brevoSenderEmail !== '') ? settings.brevoSenderEmail : envSender
+  if (senderEmail === undefined || senderEmail === '') return null
 
-  if (settings.smtpAppPasswordEncrypted !== null && settings.smtpAppPasswordEncrypted !== '') {
+  if (settings.brevoApiKeyEncrypted !== null && settings.brevoApiKeyEncrypted !== '') {
     try {
-      return { user, pass: decryptSecret(settings.smtpAppPasswordEncrypted) }
+      return { senderEmail, apiKey: decryptSecret(settings.brevoApiKeyEncrypted) }
     } catch {
       // Malformed ciphertext or SETTINGS_ENCRYPTION_KEY missing/changed —
       // fall through to the env var rather than hard-failing every email.
     }
   }
-  if (envPass === undefined || envPass === '') return null
-  return { user, pass: envPass }
+  if (envKey === undefined || envKey === '') return null
+  return { senderEmail, apiKey: envKey }
 }
 
-// v3.1 follow-up 10: nodemailer's own defaults (2 minutes for
-// connectionTimeout/socketTimeout) mean a blocked/unreachable SMTP
-// connection — e.g. a host whose network blocks outbound SMTP ports, a
-// known thing some PaaS platforms do by default to fight spam — makes the
-// whole invite/reset request (and the admin's browser, which is directly
-// awaiting it) appear to hang for up to two minutes before finally failing.
-// Shortened here so a real network problem fails fast and predictably
-// instead of looking "stuck."
-const SMTP_CONNECTION_TIMEOUT_MS = 10_000
-const SMTP_GREETING_TIMEOUT_MS = 10_000
-const SMTP_SOCKET_TIMEOUT_MS = 15_000
-
-const GMAIL_SMTP_HOST = 'smtp.gmail.com'
-const GMAIL_SMTP_PORT = 465
-const ZERO = 0
-
-// v3.1 follow-up 14: `dns.setDefaultResultOrder('ipv4first')` (index.ts,
-// v3.1 follow-up 12) turned out not to be the actual fix — it only affects
-// `dns.lookup()`, but nodemailer resolves its own host itself
-// (lib/shared/resolveHostname.js) via `dns.resolve4`/`dns.resolve6`
-// directly, bypassing that setting entirely. Worse: it then picks
-// *randomly* from the combined IPv4+IPv6 address list for every single
-// connection attempt (`formatDNSValue`'s `Math.random()`), not "IPv4 first"
-// despite what its own comment says — so roughly half of all send attempts
-// were always going to land on an IPv6 address Render can't route to,
-// matching the intermittent ENETUNREACH seen across two different Gmail
-// frontend IPs. Resolving to a concrete IPv4 address ourselves and handing
-// nodemailer that literal IP sidesteps its resolver entirely — nodemailer's
-// own resolveHostname short-circuits ("nothing to do here") whenever
-// `net.isIP(options.host)` is true. `tls.servername` keeps the TLS
-// handshake's SNI and certificate-hostname check pointed at the real
-// hostname, exactly as if we'd connected by name instead of by IP.
-async function resolveGmailSmtpIPv4(): Promise<string> {
-  const addresses = await dns.promises.resolve4(GMAIL_SMTP_HOST)
-  if (addresses.length === ZERO) {
-    throw new Error(`dns.resolve4 returned no addresses for ${GMAIL_SMTP_HOST}`)
-  }
-  return addresses[Math.floor(Math.random() * addresses.length)]
-}
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
+// Generous but bounded — an HTTPS call to Brevo should complete in well
+// under a second normally; this only guards against Brevo itself being
+// slow/down, same "fail fast and predictably" reasoning as the old SMTP
+// timeouts, just far shorter since there's no multi-step SMTP handshake here.
+const BREVO_REQUEST_TIMEOUT_MS = 10_000
 
 async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
-  // v3.1 follow-up 10: the whole function is now one try/catch, not just
-  // the transport/send part — `getSmtpCredentials()` awaits a DB call and
-  // can throw on a genuine DB error, and that was previously uncaught here,
-  // meaning it could crash the *entire* invite/reset request (500) instead
-  // of degrading to "email didn't send, here's the link" like every other
-  // email failure already does.
+  // The whole function is one try/catch — `getBrevoCredentials()` awaits a
+  // DB call and can throw on a genuine DB error, which must degrade to
+  // "email didn't send, here's the link" (the caller's existing fallback)
+  // rather than crash the whole invite/reset request.
   try {
-    const credentials = await getSmtpCredentials()
+    const credentials = await getBrevoCredentials()
     if (credentials === null) return false
+    const { senderEmail, apiKey } = credentials
 
-    const { user, pass } = credentials
-
-    // Best-effort: if this pre-resolution fails for some transient reason,
-    // fall back to the plain hostname and let nodemailer attempt its own
-    // (still IPv4-capable, just a coin flip) resolution rather than hard
-    // failing the whole send over one failed DNS call.
-    let host: string = GMAIL_SMTP_HOST
-    try {
-      host = await resolveGmailSmtpIPv4()
-    } catch (dnsErr) {
-      process.stderr.write(`resolveGmailSmtpIPv4 failed, falling back to hostname: ${getErrorMessage(dnsErr)}\n`)
-    }
-
-    const transport = nodemailer.createTransport({
-      host,
-      port: GMAIL_SMTP_PORT,
-      secure: true,
-      auth: { user, pass },
-      tls: { servername: GMAIL_SMTP_HOST },
-      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
-      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
-      socketTimeout: SMTP_SOCKET_TIMEOUT_MS
-    })
     // v3.1 follow-up 5 (Settings page): the display name is admin-editable
-    // from /settings (ShopSettings.mailSenderName). Gmail still requires
-    // the envelope address itself to be the authenticated account (or a
-    // verified "send as" alias) — silently rewrites or rejects anything
-    // else — so only the name is configurable, never the address.
+    // from /settings (ShopSettings.mailSenderName); the address itself is
+    // always the verified Brevo sender.
     const settings = await getOrCreateSettings()
-    const displayFrom = `${settings.mailSenderName} <${user}>`
-    await transport.sendMail({ from: displayFrom, to, subject, html })
+
+    const response = await fetch(BREVO_API_URL, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': apiKey
+      },
+      body: JSON.stringify({
+        sender: { name: settings.mailSenderName, email: senderEmail },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html
+      }),
+      signal: AbortSignal.timeout(BREVO_REQUEST_TIMEOUT_MS)
+    })
+
+    if (!response.ok) {
+      const bodyText = await response.text()
+      throw new Error(`Brevo API responded ${response.status.toString()} ${response.statusText}: ${bodyText}`)
+    }
     return true
   } catch (err) {
-    // v3.1 follow-up 11: this used to swallow the real error completely —
-    // `sendEmail` returning `false` on a bounded ~13s connection timeout
-    // and returning `false` on, say, a genuine auth rejection look
-    // identical from the caller's side, and neither was ever written
-    // anywhere, including Render's own logs. There was no way for anyone —
-    // including whoever's debugging this deployment — to tell which one
-    // actually happened. `morgan`'s stream is `process.stdout.write`
-    // already (see index.ts), so this uses the matching `stderr` write
-    // rather than a bare `console.error` (blocked by this repo's
-    // `no-console` rule elsewhere for the same reason).
+    // v3.1 follow-up 11: never swallow this silently — see the full
+    // reasoning in the git history for that follow-up. `morgan`'s stream is
+    // `process.stdout.write` already (see index.ts), so this uses the
+    // matching `stderr` write rather than a bare `console.error` (blocked by
+    // this repo's `no-console` rule elsewhere for the same reason).
     process.stderr.write(`sendEmail failed: ${getErrorMessage(err)}\n`)
     return false
   }

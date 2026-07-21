@@ -129,23 +129,24 @@ model ShopSettings {
   // this model). `defaultLowStockThresholdKg` is the shop-wide fallback used
   // when a product has no per-product `lowStockAlertKg` override.
   // `mailSenderName` is the display name shown on outgoing invite/reset
-  // emails (lib/email.ts) — the address itself is always the authenticated
-  // SMTP_USER, only the name is configurable.
+  // emails (lib/email.ts) — the address itself is always the verified Brevo
+  // sender (`brevoSenderEmail` below), only the name is configurable.
   defaultLowStockThresholdKg Decimal @default(5) @db.Decimal(10, 3)
   mailSenderName             String  @default("Butcher Cashier")
-  // v3.1 follow-up 9 (ADR-016). SMTP_USER/SMTP_APP_PASSWORD were previously
-  // env-var-only (set on Render, no redeploy needed but a separate login
-  // from the app). Now editable from /settings instead: `smtpUser` is
-  // plaintext (it's just an email address, not a secret — it's visible in
-  // every outgoing message's From header anyway). `smtpAppPasswordEncrypted`
-  // is the Gmail app password, but NEVER stored raw — always AES-256-GCM
-  // ciphertext via lib/encryption.ts, keyed by the SETTINGS_ENCRYPTION_KEY
-  // env var (which itself never leaves env vars). Both are nullable and
-  // fall back to the original SMTP_USER/SMTP_APP_PASSWORD env vars when
-  // unset, so an existing env-var-only deployment keeps working unchanged
-  // until someone actually fills in /settings.
-  smtpUser                  String?
-  smtpAppPasswordEncrypted  String?
+  // v3.1 follow-up 9 (ADR-016), superseded by ADR-017: this pair started out
+  // as smtpUser/smtpAppPasswordEncrypted for Gmail SMTP. Renamed rather than
+  // left stale after ADR-017 replaced Gmail SMTP with Brevo's HTTP
+  // transactional email API — Render's free tier turned out to block
+  // outbound SMTP ports (25/465/587) entirely, a platform-level restriction
+  // no application-level code could work around. `brevoSenderEmail` is
+  // plaintext (just an email address — the verified sender shown in every
+  // outgoing message's From header, not a secret). `brevoApiKeyEncrypted` is
+  // the Brevo API key, NEVER stored raw — always AES-256-GCM ciphertext via
+  // lib/encryption.ts, keyed by SETTINGS_ENCRYPTION_KEY (unchanged from
+  // ADR-016). Both nullable and fall back to BREVO_SENDER_EMAIL/
+  // BREVO_API_KEY env vars when unset.
+  brevoSenderEmail          String?
+  brevoApiKeyEncrypted      String?
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction
