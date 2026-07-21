@@ -122,9 +122,39 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
     return
   }
 
-  // One transaction: an organization without its settings row, or with a
-  // half-created admin, is a broken shop that someone has to repair by hand.
-  const organization = await prismaUnscoped.$transaction(async (tx) => {
+  // Checked BEFORE anything is written, because `User.email` is globally
+  // unique across the whole platform (see the schema comment on that field —
+  // it stays global until subdomains make login unambiguous). Without this
+  // check the create below throws a unique-constraint error, which surfaces as
+  // an unexplained 500.
+  //
+  // This is not hypothetical: it happened on the very first real use of this
+  // endpoint. The address given as the new shop's admin already existed as a
+  // cashier in the default organization.
+  if (data.adminEmail !== undefined) {
+    const emailTaken = await prismaUnscoped.user.findUnique({
+      where: { email: data.adminEmail },
+      select: { id: true }
+    })
+    if (emailTaken !== null) {
+      res.status(HTTP_STATUS.CONFLICT).json(apiError(
+        ERROR_CODES.EMAIL_ALREADY_EXISTS,
+        'That email already has an account. Email addresses are unique across every shop, so use a different one for this shop\'s admin.'
+      ))
+      return
+    }
+  }
+
+  // ONE transaction for the organization, its settings AND its first admin.
+  //
+  // The admin used to be created after the transaction committed, to avoid
+  // holding it open across the invite email. That was wrong, and the first
+  // real use proved it: the admin's email collided, the create threw, and the
+  // organization was already committed — leaving a shop with no way in and a
+  // slug that then blocked the retry with "already taken".
+  //
+  // The email is the slow part, not the user row, so only the email moved out.
+  const { organization, adminId } = await prismaUnscoped.$transaction(async (tx) => {
     const created = await tx.organization.create({
       data: {
         slug,
@@ -146,25 +176,30 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
       data: { organizationId: created.id, shopName: data.name, shopPhone: data.phone ?? null, shopAddress: data.address ?? null }
     })
 
-    return created
-  })
+    if (data.adminEmail === undefined) return { organization: created, adminId: null }
 
-  // The first admin, outside the transaction: sending email inside one holds a
-  // database transaction open for the length of an HTTP call to Brevo.
-  let inviteUrl: string | null = null
-  let inviteEmailSent = false
-  if (data.adminEmail !== undefined) {
-    const admin = await prismaUnscoped.user.create({
+    const admin = await tx.user.create({
       data: {
         email: data.adminEmail,
         password: await bcrypt.hash(crypto.randomUUID(), BCRYPT_SALT_ROUNDS),
         role: 'admin',
         passwordSet: false,
-        organizationId: organization.id
+        organizationId: created.id
       },
       select: { id: true }
     })
-    const token = await createPasswordResetToken(admin.id, PasswordResetTokenPurpose.INVITE)
+    return { organization: created, adminId: admin.id }
+  })
+
+  // Token and email outside the transaction: sending mail inside one holds a
+  // database transaction open for the length of an HTTP call to Brevo.
+  //
+  // If the email fails the organization still exists and is usable — the link
+  // comes back in the response for exactly that case.
+  let inviteUrl: string | null = null
+  let inviteEmailSent = false
+  if (adminId !== null && data.adminEmail !== undefined) {
+    const token = await createPasswordResetToken(adminId, PasswordResetTokenPurpose.INVITE)
     const { env } = process
     inviteUrl = `${env.FRONTEND_URL ?? ''}/set-password?token=${token}`
     inviteEmailSent = await sendInviteEmail(data.adminEmail, inviteUrl, 'admin')
