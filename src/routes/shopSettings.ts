@@ -51,7 +51,31 @@ const MAX_RECEIPT_HEIGHT_MM = 2000
 const MIN_RECEIPT_FONT_SCALE = 0.6
 const MAX_RECEIPT_FONT_SCALE = 2
 const MAX_RECEIPT_TEXT_LENGTH = 2000
+// Logos are their own bound because they may be `data:` URLs, which are much
+// longer than any text field. ~256 KB of base64 is roughly a 190 KB image —
+// generous for a logo, small enough that it can't be used to smuggle bulk
+// storage into the settings row. The client downscales before upload, so
+// hitting this ceiling means someone bypassed the form.
+const MAX_LOGO_URL_LENGTH = 262144
 const MIN_SHOP_NAME_LENGTH = 1
+
+// A logo value is one of two things and nothing else: an http(s) URL, or an
+// inline image. Without this check the field is a free-form text column that
+// gets rendered into an <img src> on every page and every receipt, which is
+// how you end up serving `javascript:` or `data:text/html` to your own staff.
+// The size ceiling above is a separate concern — this one is about *what* the
+// string is, not how long it is.
+const LOGO_URL_PATTERN = /^(?:https?:\/\/|data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,)/
+const LOGO_URL_MESSAGE = 'Logo must be an https:// URL or an uploaded image'
+
+// `null` clears the logo; an empty string is treated the same way by the
+// handler, so both bypass the pattern.
+const logoUrlField = z
+  .string()
+  .max(MAX_LOGO_URL_LENGTH)
+  .refine(v => v === '' || LOGO_URL_PATTERN.test(v), { message: LOGO_URL_MESSAGE })
+  .nullable()
+  .optional()
 
 // v3.1 follow-up 5 (Settings page): defaultLowStockThresholdKg/mailSenderName
 // added alongside the existing Phase J fields — same single-row shop-policy
@@ -79,7 +103,8 @@ const UpdateShopSettingsSchema = z.object({
   receiptFontScale: z.number().min(MIN_RECEIPT_FONT_SCALE).max(MAX_RECEIPT_FONT_SCALE).optional(),
   receiptHeaderText: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
   receiptFooterText: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
-  receiptLogoUrl: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  receiptLogoUrl: logoUrlField,
+  appLogoUrl: logoUrlField,
   receiptShowShopName: z.boolean().optional(),
   receiptShowPhone: z.boolean().optional(),
   receiptShowAddress: z.boolean().optional(),

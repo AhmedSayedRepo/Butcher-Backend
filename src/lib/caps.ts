@@ -4,7 +4,13 @@
 // capabilities, plus an optional per-user `caps` array (stored as Json on
 // User) for one-off overrides beyond what the role alone grants.
 
-export const ROLES = ['cashier', 'manager', 'admin'] as const
+// v3.1 follow-up 10d: `viewer` added BELOW cashier. It exists because caps are
+// purely additive — `effectiveCaps` unions the role's defaults with the user's
+// own overrides, with no way to subtract. So a genuinely read-only account
+// can't be made by unticking boxes on a cashier; it needs a role whose defaults
+// are empty. Ordering matters: ROLE_RANK derives from position, so `viewer`
+// must come first to rank lowest.
+export const ROLES = ['viewer', 'cashier', 'manager', 'admin'] as const
 export type Role = (typeof ROLES)[number]
 
 export const CAPS = [
@@ -17,7 +23,13 @@ export const CAPS = [
   // materially different trust level than taking an order, so a cashier who
   // can ring up a sale shouldn't automatically be able to log arbitrary cash
   // in/out entries or view drawer reports.
-  'manage_cash'
+  'manage_cash',
+  // v3.1 follow-up 10d: creating an order is what actually moves stock and
+  // writes a cash-ledger row, and until now it needed nothing but a login —
+  // ticking zero capabilities still granted the till. It's a capability now.
+  // Granted by default to cashier and above so no existing account loses the
+  // ability to ring up a sale; the new `viewer` role is the one that lacks it.
+  'create_orders'
 ] as const
 export type Cap = (typeof CAPS)[number]
 
@@ -50,13 +62,15 @@ export function roleRank(role: string): number {
 }
 
 // Default caps implied by each role preset, before any per-user overrides.
-// "cashier" gets none beyond what's already gated by role alone (the
-// cashier order-entry screen itself isn't cap-gated, just login-gated) —
-// see Phase E in the plan for the cashier module's own role-gating.
+// Per-user `caps` can only ADD to these — `effectiveCaps` is a union, there is
+// no deny mechanism — which is why "read-only" is a role rather than a cashier
+// with everything unticked.
 export const ROLE_DEFAULT_CAPS: Record<Role, readonly Cap[]> = {
-  cashier: [],
-  manager: ['manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash'],
-  admin: ['manage_users', 'manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash']
+  // Read-only: can see the board, inventory and customers, can change nothing.
+  viewer: [],
+  cashier: ['create_orders'],
+  manager: ['create_orders', 'manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash'],
+  admin: ['create_orders', 'manage_users', 'manage_inventory', 'manage_orders', 'dismantle_carcass', 'manage_cash']
 }
 
 export function effectiveCaps(role: string, caps: unknown): Cap[] {

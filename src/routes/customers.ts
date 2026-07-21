@@ -78,7 +78,10 @@ const CustomerSchema = z.object({
   notes: z.string().optional()
 })
 
-router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
+// v3.1 follow-up 10d: creating a customer is part of taking an order (the
+// order form creates one inline), so it rides on the same cap rather than
+// `manage_orders`, which is the higher bar for editing/deleting them.
+router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   const parsed = CustomerSchema.safeParse(req.body)
   if (!parsed.success) {
     res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })

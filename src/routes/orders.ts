@@ -142,7 +142,11 @@ router.get('/', auth, asyncHandler(async (req, res) => {
 
 const CREATE_ORDER_ENDPOINT = 'POST /api/orders'
 
-router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
+// v3.1 follow-up 10d: gated on `create_orders`. This handler decrements stock
+// and writes a cash-ledger row, so "logged in" was too low a bar. Every role
+// from cashier up holds the cap by default — only the new `viewer` role
+// doesn't — so no existing account loses the till.
+router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
@@ -296,7 +300,7 @@ router.post('/', auth, asyncHandler<AuthRequest>(async (req, res) => {
 // see the plan's Phase C section for why.
 const CREATE_DRAFT_ENDPOINT = 'POST /api/orders/draft'
 
-router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
+router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
@@ -380,7 +384,7 @@ router.post('/draft', auth, asyncHandler<AuthRequest>(async (req, res) => {
 // stock-decrement transaction the direct-create path above uses.
 const PROMOTE_ORDER_ENDPOINT = 'POST /api/orders/:id/promote'
 
-router.post('/:id/promote', auth, asyncHandler<AuthRequest>(async (req, res) => {
+router.post('/:id/promote', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return

@@ -15,7 +15,10 @@ const router = Router()
 
 // v2 replan (Phase B): optional `category` filter, e.g. GET /api/products?category=Beef
 // — additive, GET /api/products with no query still returns everything.
-router.get('/', asyncHandler(async (req, res) => {
+// v3.1 follow-up 10d: was public. The product list carries prices and live
+// stock levels — commercially sensitive, and there is no anonymous surface in
+// this app that needs it (every page is behind AuthGate).
+router.get('/', auth, asyncHandler(async (req, res) => {
   const { query } = req
   const { category } = query
   const where = typeof category === 'string' && category !== '' ? { category } : {}
@@ -183,7 +186,9 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
 
 // v2 replan (Phase B): audit trail for a single product's stock history —
 // "why did this change," not just "what is it now."
-router.get('/:id/adjustments', asyncHandler(async (req, res) => {
+// v3.1 follow-up 10d: was public — anyone with the URL could read this
+// product's entire stock-movement history. Now requires a login.
+router.get('/:id/adjustments', auth, asyncHandler(async (req, res) => {
   const { params } = req
   const { id } = params
   const adjustments = await prisma.stockAdjustment.findMany({

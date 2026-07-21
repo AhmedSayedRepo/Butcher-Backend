@@ -6,6 +6,7 @@ import { OrderStatus } from '@prisma/client'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
+import { requireCap } from '../middleware/rbac.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
@@ -75,7 +76,9 @@ async function fullOrder(id: string): Promise<OrderWithProducts> {
   })
 }
 
-router.patch('/:id', auth, asyncHandler<AuthRequest>(async (req, res) => {
+// v3.1 follow-up 10d: same gate as creating a draft — editing or discarding
+// one is the same authority.
+router.patch('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
@@ -160,7 +163,7 @@ router.patch('/:id', auth, asyncHandler<AuthRequest>(async (req, res) => {
 // the history; a draft that was never confirmed is just a half-finished note,
 // and keeping a CANCELLED row for every mistyped draft would clutter the
 // board and the reports for no informational gain.
-router.delete('/:id', auth, asyncHandler<AuthRequest>(async (req, res) => {
+router.delete('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
     return
