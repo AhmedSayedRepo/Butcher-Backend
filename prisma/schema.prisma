@@ -174,6 +174,12 @@ model ShopSettings {
   receiptShowCode     Boolean  @default(true)
   receiptShowCashier  Boolean  @default(false)
   receiptShowDateTime Boolean  @default(true)
+  // v3.1 follow-up 10a: the item table and the customer's own details are
+  // toggleable too. A shop printing a plain payment slip (rather than an
+  // itemised bill) wants neither; a delivery shop wants both.
+  receiptShowItems    Boolean  @default(true)
+  receiptShowCustomer Boolean  @default(true)
+  receiptShowAddressOfCustomer Boolean @default(false)
   // The shop's own contact details, printed on the receipt when the toggles
   // above are on. They had no home before this — the app knew the shop's
   // name only as a hardcoded UI string.

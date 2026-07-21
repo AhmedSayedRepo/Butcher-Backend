@@ -87,6 +87,9 @@ const UpdateShopSettingsSchema = z.object({
   receiptShowCode: z.boolean().optional(),
   receiptShowCashier: z.boolean().optional(),
   receiptShowDateTime: z.boolean().optional(),
+  receiptShowItems: z.boolean().optional(),
+  receiptShowCustomer: z.boolean().optional(),
+  receiptShowAddressOfCustomer: z.boolean().optional(),
   shopName: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional(),
   shopPhone: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
   shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional()

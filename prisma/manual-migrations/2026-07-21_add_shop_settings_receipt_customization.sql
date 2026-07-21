@@ -29,9 +29,12 @@ ALTER TABLE "ShopSettings"
   ADD COLUMN IF NOT EXISTS "receiptShowDateTime" BOOLEAN        NOT NULL DEFAULT TRUE,
   ADD COLUMN IF NOT EXISTS "shopName"            TEXT           NOT NULL DEFAULT 'Butcher Cashier',
   ADD COLUMN IF NOT EXISTS "shopPhone"           TEXT,
-  ADD COLUMN IF NOT EXISTS "shopAddress"         TEXT;
+  ADD COLUMN IF NOT EXISTS "shopAddress"         TEXT,
+  ADD COLUMN IF NOT EXISTS "receiptShowItems"     BOOLEAN       NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS "receiptShowCustomer"  BOOLEAN       NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS "receiptShowAddressOfCustomer" BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Verify:
 --   select column_name from information_schema.columns
 --   where table_name = 'ShopSettings' and column_name like 'receipt%';
--- Expect 13 rows.
+-- Expect 16 rows.
