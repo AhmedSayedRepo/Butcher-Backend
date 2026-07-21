@@ -58,6 +58,32 @@ const VERSION = (() => {
   }
 })()
 
+// Security audit 2026-07-21 — REAL bug, not hardening theatre.
+//
+// Render terminates TLS at its edge and forwards to this process over HTTP,
+// so without this every request's `req.ip` is Render's proxy address rather
+// than the caller's. Two consequences, both bad:
+//
+//   1. `express-rate-limit` keys on `req.ip`. With every request reporting the
+//      same address, the login limiter's 10-attempts-per-15-minutes became a
+//      GLOBAL budget: one attacker could exhaust it and lock every genuine
+//      user out of the shop, and conversely an attacker spreading attempts
+//      across the whole window shared a bucket with real staff.
+//   2. `secure` cookies and protocol detection rely on `X-Forwarded-Proto`,
+//      which Express ignores without this.
+//
+// Exactly one hop — Render's own proxy — rather than believing whatever
+// `X-Forwarded-For` chain a client sends. Express also accepts `true` here,
+// which trusts the whole chain; that would let anyone spoof their IP and
+// bypass rate limiting entirely, i.e. a worse bug than the one being fixed.
+const TRUSTED_PROXY_HOPS = 1
+app.set('trust proxy', TRUSTED_PROXY_HOPS)
+
+// Helmet's defaults set HSTS, X-Content-Type-Options, frame denial and
+// referrer policy. A Content-Security-Policy is deliberately NOT configured
+// here: this process serves JSON only — the HTML comes from Vercel, so a CSP
+// set on these responses would protect nothing. The CSP that matters belongs
+// in the frontend's `next.config.js` headers, which is tracked separately.
 app.use(helmet())
 // Phase 5 hardening: no request logging existed at all before this — the
 // only visibility into traffic was whatever a route handler happened to log

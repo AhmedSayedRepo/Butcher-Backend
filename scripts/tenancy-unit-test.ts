@@ -75,5 +75,35 @@ t('cors: nested label rejected', allow('https://a.b.butchercashier.com'), false)
 t('cors: no origin allowed', allow(undefined), true)
 t('cors: unrelated rejected', allow('https://evil.com'), false)
 
+
+// ── Security audit 2026-07-21 ────────────────────────────────────────────────
+// Injection payloads. The point is to assert the *behaviour* rather than to
+// trust that "Prisma parameterises, so we're fine" — these are the strings an
+// attacker actually sends, checked against the code that receives them.
+console.log('')
+
+// A slug becomes a subdomain. Anything that isn't a plain DNS label is refused
+// outright, which incidentally makes every injection payload below impossible
+// to store as a slug in the first place.
+const slugAttacks = [
+  "'; DROP TABLE \"Order\"; --",
+  '<script>alert(1)</script>',
+  '../../etc/passwd',
+  'a b',
+  'shop%00',
+  '.',
+  '*',
+  'shop.evil.com',
+  '${process.env.JWT_SECRET}'
+]
+for (const attack of slugAttacks) {
+  t(`slug rejects ${JSON.stringify(attack).slice(0, 32)}`, isValidSlug(attack), false)
+}
+
+// The organization header is only ever compared, never concatenated into a
+// query — so a payload in it is inert, and simply fails to match a real slug.
+t('org header: payload stays a plain string', requestedSlug("' OR 1=1 --"), "' or 1=1 --")
+t('org header: payload never matches a real org', subdomainMismatch("' OR 1=1 --", 'alaqsa'), true)
+
 console.log(`\n${pass}/${pass + fail} passed`)
 if (fail > 0) process.exitCode = 1
