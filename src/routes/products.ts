@@ -36,7 +36,10 @@ router.get('/', auth, asyncHandler(async (req, res) => {
 router.get('/by-barcode/:code', auth, asyncHandler(async (req, res) => {
   const { params } = req
   const { code } = params
-  const product = await prisma.product.findUnique({ where: { barcode: code } })
+  // findFirst, not findUnique: `barcode` is unique *per organization* now, and
+  // the organization half comes from the tenant context rather than from the
+  // caller — so there is no complete unique key to hand findUnique.
+  const product = await prisma.product.findFirst({ where: { barcode: code } })
   if (product === null) {
     res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.BARCODE_NOT_FOUND, 'No product with that barcode'))
     return

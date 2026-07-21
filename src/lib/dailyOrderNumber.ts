@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import type { TransactionClient } from './db.js'
 
 // v3.1 replan (Phase L — daily order numbering + closing day, ADR-015).
 // Assigns the next sequential per-day order number ("#1", "#2", ...) by
@@ -12,7 +12,7 @@ import type { Prisma } from '@prisma/client'
 // in Cash Management), so the first order of the next day gets #1 again.
 const FIRST_DAILY_NUMBER = 1
 
-export async function nextDailyOrderNumber(tx: Prisma.TransactionClient): Promise<number> {
+export async function nextDailyOrderNumber(tx: TransactionClient): Promise<number> {
   const existing = await tx.shopSettings.findFirst()
   if (existing === null) {
     const created = await tx.shopSettings.create({ data: { dailyOrderCounter: FIRST_DAILY_NUMBER } })

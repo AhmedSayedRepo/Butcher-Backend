@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import type { Prisma, DismantleEventOutput } from '@prisma/client'
+import type { DismantleEventOutput } from '@prisma/client'
 import { prisma } from '../lib/db.js'
+import type { TransactionClient } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { requireCap } from '../middleware/rbac.js'
@@ -217,7 +218,7 @@ interface ApplyOutputUpdateContext {
 }
 
 async function applyOutputUpdate(
-  tx: Prisma.TransactionClient,
+  tx: TransactionClient,
   before: DismantleEventOutput,
   u: z.infer<typeof UpdateOutputSchema>,
   ctx: ApplyOutputUpdateContext

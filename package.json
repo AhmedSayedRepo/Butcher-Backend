@@ -15,7 +15,9 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed": "tsx prisma/seed.ts",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "test:tenancy": "tsx scripts/tenancy-leak-test.ts",
+    "test:tenancy:unit": "tsx scripts/tenancy-unit-test.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.17.0",

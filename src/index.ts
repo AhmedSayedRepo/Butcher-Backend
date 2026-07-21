@@ -10,6 +10,7 @@ import morgan from 'morgan'
 import helmet from 'helmet'
 import { prisma } from './lib/db.js'
 import { apiError, ERROR_CODES } from './lib/errorCodes.js'
+import { buildOriginChecker } from './lib/corsOrigin.js'
 import products from './routes/products.js'
 import orders from './routes/orders.js'
 import orderReceiptScan from './routes/orderReceiptScan.js'
@@ -17,6 +18,7 @@ import orderDrafts from './routes/orderDrafts.js'
 import parseOrder from './routes/parseOrder.js'
 import authRouter from './routes/auth.js'
 import usersRouter from './routes/users.js'
+import organizationsRouter from './routes/organizations.js'
 import dismantleTemplatesRouter from './routes/dismantleTemplates.js'
 import dismantleEventsRouter from './routes/dismantleEvents.js'
 import whatsappWebhookRouter from './routes/whatsappWebhook.js'
@@ -86,8 +88,13 @@ app.use(cookieParser())
 // `cors` package reflect the request's own Origin header instead, which is
 // safe for a single-tenant internal tool and still requires an explicit,
 // same-shape Origin from the browser (not a literal wildcard).
+// Multi-tenancy phase 3: `CORS_ORIGIN` (exact hosts) still works and is what
+// the current single-host deployment uses; `CORS_WILDCARD_DOMAIN` adds
+// `https://<shop>.<domain>` without needing an entry per customer. See
+// lib/corsOrigin.ts for why that's an anchored pattern rather than a
+// `.endsWith()` check.
 app.use(cors({
-  origin: process.env.CORS_ORIGIN?.split(',') ?? true,
+  origin: buildOriginChecker(),
   credentials: true
 }))
 
@@ -110,6 +117,7 @@ app.use('/api/orders', orderReceiptScan)
 app.use('/api/orders', orderDrafts)
 app.use('/api/parse-order', parseOrder)
 app.use('/api/users', usersRouter)
+app.use('/api/organizations', organizationsRouter)
 app.use('/api/dismantle-templates', dismantleTemplatesRouter)
 app.use('/api/dismantle-events', dismantleEventsRouter)
 // v3 replan: Phase H (CRM), Phase K (cash management), Phase J (shop-wide

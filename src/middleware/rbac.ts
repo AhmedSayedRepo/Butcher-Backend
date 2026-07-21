@@ -1,5 +1,5 @@
 import type { Response, NextFunction } from 'express'
-import { prisma } from '../lib/db.js'
+import { prisma, prismaUnscoped } from '../lib/db.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import type { AuthRequest } from './auth.js'
 import { roleRank, effectiveCaps } from '../lib/caps.js'
@@ -79,4 +79,40 @@ export function requireCap(cap: Cap) {
       })
       .catch(next)
   }
+}
+
+// Multi-tenancy phase 4 (Butcher-Multi-Tenancy-Plan.md §5) — the operator gate.
+//
+// Deliberately NOT a rung on the role ladder above `admin`. `role`/`caps`
+// describe authority *inside* a shop; a super admin has none there and
+// authority over the shops themselves instead. Modelling it as "admin+1" would
+// have silently changed the meaning of every existing `requireRole` call.
+//
+// Re-read from the database on every call for the same reason `requireRole`
+// is: a JWT lives for seven days, and revoking the highest privilege in the
+// product should not wait a week.
+//
+// This gate does **not** grant access to any shop's data — nothing here opens
+// a tenant context. A super admin managing billing has no business reading a
+// shop's customer list, and the plan's suggested route to "sign in as this
+// shop to debug" is an explicit, audited impersonation action, not an
+// implicit consequence of the flag.
+export function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction): void {
+  if (req.user === undefined) {
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
+    return
+  }
+  // eslint-disable-next-line @typescript-eslint/prefer-destructuring -- see the note on requireRole above
+  const { id } = req.user
+
+  prismaUnscoped.user
+    .findUnique({ where: { id }, select: { isSuperAdmin: true } })
+    .then((current) => {
+      if (current?.isSuperAdmin !== true) {
+        res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.SUPER_ADMIN_REQUIRED, 'Requires super admin'))
+        return
+      }
+      next()
+    })
+    .catch(next)
 }

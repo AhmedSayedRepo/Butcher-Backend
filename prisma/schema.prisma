@@ -7,8 +7,90 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ============================================================================
+// Multi-tenancy — phase 1 (Butcher-Multi-Tenancy-Plan.md).
+//
+// One shop per Organization. The app, the deployment and this database are
+// shared; isolation is by `organizationId` on every tenant-scoped row, with a
+// Prisma client extension and Postgres RLS enforcing it (plan §4 — NOT yet
+// built, which is why nothing reads these columns yet).
+//
+// Every `organizationId` below is deliberately NULLABLE at this stage. The
+// column has to exist and be backfilled *before* the code that populates it
+// ships, and NOT NULL would break the currently-deployed code the moment it
+// inserted a row without one. Tightening to NOT NULL, plus swapping the
+// global unique constraints for composite ones, is a later migration that
+// lands with the code — see plan §7 steps 5-6.
+// ============================================================================
+model Organization {
+  id String @id @default(uuid())
+
+  // The subdomain: alaqsa.butchercashier.com. Constrained at the API layer to
+  // lowercase letters/digits/hyphens, 3-40 chars, and checked against a
+  // reserved list (www, api, admin, app, mail...). Unique globally — it IS the
+  // routing key, so a duplicate would be ambiguous, not just untidy.
+  slug String @unique
+
+  name    String
+  email   String
+  phone   String?
+  address String? @db.Text
+
+  // --- Billing (plan §8a). Four fields and no payment provider: the provider
+  // integration is deferred until there are customers to bill, and until then
+  // a super admin sets these by hand and invoices manually. `billingStatus`
+  // is the one the app will actually read.
+  //
+  // Strings rather than enums so adding a plan is a deploy, not a migration.
+  plan          String    @default("trial")  // trial | basic | pro
+  billingStatus String    @default("active") // active | past_due | suspended | cancelled
+  trialEndsAt   DateTime?
+  // Often not the shop's contact address — the owner's accountant, typically.
+  billingEmail  String?
+  // The payment provider's customer id, once there is a provider.
+  externalCustomerId String?
+
+  // Soft delete. A hard delete would cascade through orders, cash and stock
+  // history — the same reasoning that made user deletion return 409, with far
+  // more at stake. An archived org is refused at sign-in; its data stays.
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users                 User[]
+  passwordResetTokens   PasswordResetToken[]
+  customers             Customer[]
+  cashTransactions      CashTransaction[]
+  settings              ShopSettings[]
+  idempotencyKeys       IdempotencyKey[]
+  products              Product[]
+  orders                Order[]
+  orderStatusEvents     OrderStatusEvent[]
+  orderItems            OrderItem[]
+  stockAdjustments      StockAdjustment[]
+  dismantleEvents       DismantleEvent[]
+  dismantleEventOutputs DismantleEventOutput[]
+  dailyClosings         DailyClosing[]
+
+  @@index([archivedAt])
+}
+
 model User {
   id        String   @id @default(uuid())
+  // Multi-tenancy: deliberately STILL GLOBALLY UNIQUE, unlike the other
+  // constraints in this schema.
+  //
+  // The plan (§2) proposed making this per-organization so one person could
+  // hold accounts at two shops. That's blocked on something not built yet:
+  // login is by email alone, and with per-org emails it would have to know
+  // WHICH organization is being logged into — which means the subdomain, which
+  // means phase 7 DNS. Until then a per-org constraint would make login
+  // ambiguous, and an ambiguous login is a worse problem than the one it
+  // solves.
+  //
+  // So for now: one email address = one account across the whole platform.
+  // Revisit when subdomains are live; the migration is additive.
   email     String   @unique
   password  String
   role      String   @default("admin")
@@ -44,6 +126,25 @@ model User {
   cashTransactions    CashTransaction[]
   passwordResetTokens PasswordResetToken[]
   dailyClosings       DailyClosing[]
+  // Multi-tenancy phase 4 — the operator, not a shop employee.
+  //
+  // A super admin belongs to NO organization (organizationId stays null) and
+  // manages the organizations themselves. Deliberately a flag rather than a
+  // role: `role`/`caps` describe what someone can do *inside* a shop, and
+  // adding a rung to that ladder would have made every existing role check
+  // quietly mean something new.
+  //
+  // Bootstrapped by SQL, once. There is no self-service path to becoming one
+  // and there shouldn't be.
+  //
+  // Note this does NOT grant access to shop data — see requireSuperAdmin.
+  isSuperAdmin Boolean @default(false)
+
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3 follow-up: backs both the admin-invite "set your password" flow and
@@ -67,6 +168,11 @@ model PasswordResetToken {
   createdAt DateTime                  @default(now())
 
   user User @relation(fields: [userId], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3 replan (Phase H — CRM). Deliberately minimal (ADR-013 / "Customer data
@@ -91,6 +197,11 @@ model Customer {
   updatedAt DateTime @updatedAt
 
   orders Order[]
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3 replan (Phase K — cash management). Append-only ledger (ADR-011) — a
@@ -112,6 +223,11 @@ model CashTransaction {
   createdAt DateTime            @default(now())
 
   user User @relation(fields: [userId], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3 replan (Phase J — pending-order alerting). Single-row config table:
@@ -206,6 +322,11 @@ model ShopSettings {
   shopName            String   @default("Butcher Cashier")
   shopPhone           String?
   shopAddress         String?  @db.Text
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction
@@ -221,7 +342,14 @@ model IdempotencyKey {
   responseBody Json
   createdAt    DateTime @default(now())
 
-  @@unique([key, endpoint])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  // Multi-tenancy: two shops retrying independently must not collide, and a
+  // client-generated UUID is not something to bet a double-charge on.
+  @@unique([organizationId, key, endpoint])
 }
 
 model Product {
@@ -238,13 +366,24 @@ model Product {
   // products stay valid unbackfilled; a scanner is a keyboard-emulation
   // device feeding a lookup against this field (ADR-008), not a device
   // integration.
-  barcode         String?  @unique
+  // Multi-tenancy: per-organization, not global. Supplier-printed barcodes are
+  // guaranteed to repeat across shops — the same wholesaler serves both — so a
+  // global constraint would mean the second shop simply couldn't record the
+  // product. Postgres treats NULLs as distinct, so unbarcoded products are
+  // unaffected.
+  barcode         String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   items            OrderItem[]
   stockAdjustments StockAdjustment[]
   dismantleOutputs DismantleEventOutput[]
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@unique([organizationId, barcode])
 }
 
 // v2 replan (Phase C — order kanban). DRAFT = saved but not yet promoted
@@ -318,7 +457,10 @@ model Order {
   // reach COMPLETED — see the OrderStatus comment above. Nullable because
   // pre-migration order rows have none, and DRAFT rows never get one at
   // all (nothing to scan for an order that hasn't happened yet).
-  receiptCode String? @unique
+  // Multi-tenancy: per-organization. The code is 8 random characters, so a
+  // collision across shops is unlikely rather than impossible — and an
+  // unlikely event that blocks a sale is still a bug.
+  receiptCode String?
   // v3.1 follow-up 10b: who is physically taking this order out — the driver
   // or courier. Free text rather than a User relation: deliveries are often
   // handed to someone who has no login (a relative, a hired bike). Shown on
@@ -332,6 +474,12 @@ model Order {
   user        User        @relation(fields: [userId], references: [id])
   items       OrderItem[]
   statusEvents OrderStatusEvent[]
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@unique([organizationId, receiptCode])
 }
 
 // Append-only history of Order.status transitions — see ADR-006 in
@@ -347,6 +495,11 @@ model OrderStatusEvent {
 
   order         Order @relation(fields: [orderId], references: [id])
   changedByUser User? @relation(fields: [changedBy], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 model OrderItem {
@@ -358,6 +511,11 @@ model OrderItem {
 
   order   Order   @relation(fields: [orderId], references: [id])
   product Product @relation(fields: [productId], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v2 replan (Phase B — inventory upgrades): records *why* stockKg changed
@@ -373,6 +531,11 @@ model StockAdjustment {
 
   product Product @relation(fields: [productId], references: [id])
   user    User    @relation(fields: [userId], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v2 replan (Phase B.5 — carcass dismantling module: calf, sheep, goat).
@@ -417,6 +580,11 @@ model DismantleEvent {
   template DismantleTemplate     @relation(fields: [templateId], references: [id])
   user     User                  @relation(fields: [performedBy], references: [id])
   outputs  DismantleEventOutput[]
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 // v3.1 replan (Phase L — closing day, ADR-015). One row per "closing day"
@@ -437,6 +605,11 @@ model DailyClosing {
   netPosition  Decimal  @db.Decimal(10,2)
 
   closedByUser User @relation(fields: [closedBy], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }
 
 model DismantleEventOutput {
@@ -450,4 +623,9 @@ model DismantleEventOutput {
 
   event   DismantleEvent @relation(fields: [eventId], references: [id])
   product Product?       @relation(fields: [productId], references: [id])
+  // Multi-tenancy phase 1 — nullable for now, see the Organization model.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
 }

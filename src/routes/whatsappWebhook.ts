@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import type { Request } from 'express'
 import { OrderStatus } from '@prisma/client'
-import { prisma } from '../lib/db.js'
+import { prisma, prismaUnscoped } from '../lib/db.js'
+import { runInTenantContext } from '../lib/tenantContext.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { parseOrderMessage } from '../lib/parseOrderMessage.js'
@@ -117,23 +118,67 @@ const NO_MATCHES = 0
 // (Order.userId is a required FK — no logged-in staff member is driving
 // this path). Seeded once in prisma/seed.ts; see that file for why this is
 // a real seeded row rather than a nullable column.
-async function getSystemUserId(): Promise<string> {
+// Multi-tenancy — a KNOWN LIMITATION, stated plainly rather than hidden.
+//
+// This webhook is unauthenticated (Meta signs it with an HMAC; there is no
+// session), so there is no tenant context and the Prisma extension has nothing
+// to inject. The organization therefore has to be resolved here, explicitly.
+//
+// Meta delivers every message for a WhatsApp Business number to ONE webhook
+// URL, so with a single number there is exactly one shop this can belong to.
+// It's taken from the system user's own row — that user is seeded per
+// deployment and already identifies the shop.
+//
+// The real multi-tenant answer is a `whatsappPhoneNumberId` column on
+// Organization, matched against `value.metadata.phone_number_id` in the
+// payload, so several shops can share one webhook. That's deliberately NOT
+// built yet: WhatsApp number verification is still outstanding on your side
+// (see ROADMAP), so there is no second number to route, and building a routing
+// table for a case that can't be tested would be guessing.
+//
+// Until then, inbound WhatsApp orders all land in the system user's own shop.
+async function getSystemUser(): Promise<{ id: string, organizationId: string | null }> {
   const email = process.env.WHATSAPP_SYSTEM_USER_EMAIL ?? 'whatsapp-bot@system.internal'
-  const user = await prisma.user.findUnique({ where: { email } })
+  // Unscoped: no tenant context exists here, and this lookup is what
+  // establishes which organization the message belongs to.
+  const user = await prismaUnscoped.user.findUnique({
+    where: { email },
+    select: { id: true, organizationId: true }
+  })
   if (user === null) {
     throw new Error(`WhatsApp system user not seeded: ${email}. Run "npm run seed" first.`)
   }
-  return user.id
+  return user
 }
 
 async function handleInboundOrderMessage(fromPhone: string, text: string, contactName: string | undefined): Promise<void> {
+  const { id: userId, organizationId } = await getSystemUser()
+
+  // Everything below runs inside the resolved organization's context, rather
+  // than each create naming it. That matters for more than tidiness:
+  // `parseOrderMessage` reads the product catalogue to match item names, and
+  // unscoped it would match against EVERY shop's products — a cross-tenant
+  // read that would put another shop's prices on this shop's draft order.
+  //
+  // Opening the context once covers the parse, the creates, and anything
+  // added to this path later, which is exactly the property the extension
+  // exists to provide.
+  await runInTenantContext({ organizationId, isSuperAdmin: false }, async () => {
+    await createDraftFromMessage({ fromPhone, text, contactName, userId })
+  })
+}
+
+async function createDraftFromMessage({ fromPhone, text, contactName, userId }: {
+  fromPhone: string
+  text: string
+  contactName: string | undefined
+  userId: string
+}): Promise<void> {
   const { items } = await parseOrderMessage(text)
   const matched = items.filter(
     (i): i is typeof i & { productId: string, pricePerKg: string } => i.productId !== null && i.pricePerKg !== null
   )
   const total = matched.reduce((sum, it) => sum + Number(it.pricePerKg) * it.requested_kg, INITIAL_TOTAL)
-  const userId = await getSystemUserId()
-
   // Same draft-creation shape as POST /api/orders/draft (Phase C): no stock
   // decrement yet, stock gets re-checked when staff promote it from the
   // pending-orders dashboard. Unmatched items never become OrderItem rows

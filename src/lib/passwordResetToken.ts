@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { PasswordResetTokenPurpose } from '@prisma/client'
 import type { PasswordResetToken, User } from '@prisma/client'
-import { prisma } from './db.js'
+import { prisma, prismaUnscoped } from './db.js'
 
 // v3 follow-up: shared by the admin-invite ("set your password") and
 // self-service "forgot password" flows — see the schema comment on
@@ -19,7 +19,23 @@ export async function createPasswordResetToken(userId: string, purpose: Password
   const token = crypto.randomBytes(TOKEN_BYTES).toString('hex')
   const hours = purpose === PasswordResetTokenPurpose.INVITE ? INVITE_EXPIRY_DAYS * HOURS_PER_DAY : RESET_EXPIRY_HOURS
   const expiresAt = new Date(Date.now() + hours * MS_PER_HOUR)
-  await prisma.passwordResetToken.create({ data: { userId, token, purpose, expiresAt } })
+
+  // Multi-tenancy: `organizationId` is copied from the user rather than left
+  // to the tenant extension, because the one flow that matters here —
+  // `POST /auth/forgot-password` — is UNAUTHENTICATED. There is no tenant
+  // context, so the extension injects nothing, and once the column is NOT NULL
+  // that create fails: "forgot password" would break for everyone.
+  //
+  // Found by walking every create that can run outside a tenant context before
+  // adding the constraint, rather than by watching it fail in production.
+  const owner = await prismaUnscoped.user.findUnique({
+    where: { id: userId },
+    select: { organizationId: true }
+  })
+
+  await prisma.passwordResetToken.create({
+    data: { userId, token, purpose, expiresAt, organizationId: owner?.organizationId ?? null }
+  })
   return token
 }
 

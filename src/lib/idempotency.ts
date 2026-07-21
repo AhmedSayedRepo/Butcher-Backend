@@ -19,8 +19,11 @@ import { prisma } from './db.js'
 
 export async function findIdempotentResponse(endpoint: string, key: string | undefined): Promise<unknown> {
   if (key === undefined || key === '') return undefined
-  const existing = await prisma.idempotencyKey.findUnique({
-    where: { key_endpoint: { key, endpoint } }
+  // findFirst for the same reason as the barcode lookup: the unique key is
+  // now (organizationId, key, endpoint), and the organization half is supplied
+  // by the tenant context, not by this caller.
+  const existing = await prisma.idempotencyKey.findFirst({
+    where: { key, endpoint }
   })
   return existing === null ? undefined : existing.responseBody
 }

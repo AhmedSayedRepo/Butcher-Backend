@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { prisma } from '../lib/db.js'
+import { prismaUnscoped } from '../lib/db.js'
+import { runInTenantContext } from '../lib/tenantContext.js'
+import { ORG_SLUG_HEADER, requestedSlug, subdomainMismatch, isBlockedByBilling } from './tenant.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
@@ -15,7 +17,15 @@ const BEARER_PREFIX = 'Bearer '
 export const AUTH_COOKIE_NAME = 'butcher_token'
 
 export interface AuthRequest extends Request {
-  user?: { id: string, email: string, role: string }
+  user?: {
+    id: string
+    email: string
+    role: string
+    // Multi-tenancy phase 3. Null only for a super admin, who belongs to no
+    // shop. Read from the database row, never from the token — see below.
+    organizationId: string | null
+    isSuperAdmin: boolean
+  }
 }
 
 interface AuthTokenPayload {
@@ -105,7 +115,34 @@ export function auth(req: AuthRequest, res: Response, next: NextFunction): void 
   }
   const { id, email, role } = payload
 
-  prisma.user.findUnique({ where: { id }, select: { bannedAt: true } })
+  // `prismaUnscoped` deliberately: this lookup runs *before* a tenant context
+  // exists, and it's the query that establishes which one to use. Scoping it
+  // would need the answer it's about to produce.
+  //
+  // Multi-tenancy phase 3 — organizationId comes from the DATABASE ROW, not
+  // from the JWT. A token is a snapshot: an account moved between shops, or a
+  // shop archived, would keep working off a stale claim for up to seven days.
+  // The row is current by definition, and this is the same single indexed read
+  // the ban check already does, so it costs nothing extra.
+  //
+  // It is also why the subdomain is not trusted for this. The URL says which
+  // login page you saw; the session says whose data you get. Deriving the
+  // tenant from the host would make switching shops a matter of editing the
+  // address bar.
+  prismaUnscoped.user
+    .findUnique({
+      where: { id },
+      select: {
+        bannedAt: true,
+        organizationId: true,
+        isSuperAdmin: true,
+        // The organization comes back on the same row lookup the ban check
+        // already does, so the subdomain and billing checks below cost nothing
+        // extra. Doing them as separate middlewares would have meant three
+        // queries per request and a new router silently missing them.
+        organization: { select: { slug: true, archivedAt: true, billingStatus: true } }
+      }
+    })
     .then((current) => {
       // Deleted account: the token is signed and unexpired but the row is gone.
       if (current === null) {
@@ -116,8 +153,41 @@ export function auth(req: AuthRequest, res: Response, next: NextFunction): void 
         res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ACCOUNT_BANNED, 'This account has been disabled. Contact an administrator.'))
         return
       }
-      Object.assign(req, { user: { id, email, role } })
-      next()
+
+      const { organizationId, isSuperAdmin, organization } = current
+
+      // A super admin belongs to no organization, so none of the checks below
+      // have anything to compare against — they're skipped, not passed.
+      if (!isSuperAdmin && organization !== null) {
+        if (organization.archivedAt !== null) {
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ORGANIZATION_ARCHIVED, 'This account has been closed.'))
+          return
+        }
+        if (subdomainMismatch(requestedSlug(req.headers[ORG_SLUG_HEADER]), organization.slug)) {
+          // 403, not 404: the organization plainly exists — its login page is
+          // public — so pretending otherwise buys nothing and makes a genuine
+          // "you're signed into the wrong shop" needlessly confusing.
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.WRONG_ORGANIZATION, 'You are signed in to a different organization.'))
+          return
+        }
+        if (isBlockedByBilling(req.method, organization.billingStatus)) {
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(
+            ERROR_CODES.BILLING_SUSPENDED,
+            'This account is read-only while billing is suspended. Contact support.'
+          ))
+          return
+        }
+      }
+
+      Object.assign(req, { user: { id, email, role, organizationId, isSuperAdmin } })
+
+      // Everything downstream — every route handler, every helper they call,
+      // every promise those await — runs inside this context, which is what
+      // lets the Prisma extension scope queries without anyone passing an
+      // organization id around. `next()` is called *inside* the context on
+      // purpose; calling it outside would leave the store empty exactly where
+      // it's needed.
+      runInTenantContext({ organizationId, isSuperAdmin }, next)
     })
     .catch(next)
 }
