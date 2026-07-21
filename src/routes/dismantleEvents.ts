@@ -7,6 +7,7 @@ import type { AuthRequest } from '../middleware/auth.js'
 import { requireCap } from '../middleware/rbac.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -96,7 +97,7 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
     include: { outputs: true, template: { include: { cuts: true } } }
   })
   if (event === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Dismantle event not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.DISMANTLE_EVENT_NOT_FOUND, 'Dismantle event not found'))
     return
   }
   res.json(withComputedFields(event))
@@ -107,7 +108,7 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
 // by default, same reasoning as `manage_inventory` on products.ts.
 router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user } = req
@@ -115,7 +116,7 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
 
   const parsed = CreateEventSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -123,14 +124,14 @@ router.post('/', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRequest
 
   const template = await prisma.dismantleTemplate.findUnique({ where: { id: templateId } })
   if (template === null) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Unknown dismantle template' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.DISMANTLE_TEMPLATE_UNKNOWN, 'Unknown dismantle template'))
     return
   }
 
   for (const o of outputs) {
     if (o.productId !== undefined && o.newProduct !== undefined) {
       res.status(HTTP_STATUS.BAD_REQUEST).json({
-        error: `Output "${o.cutName}" specifies both productId and newProduct — pick one`
+        ...apiError(ERROR_CODES.DISMANTLE_OUTPUT_AMBIGUOUS, `Output "${o.cutName}" specifies both productId and newProduct — pick one`, { name: o.cutName })
       })
       return
     }
@@ -260,13 +261,13 @@ router.patch('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthReq
 
   const existing = await prisma.dismantleEvent.findUnique({ where: { id }, include: { outputs: true } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Dismantle event not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.DISMANTLE_EVENT_NOT_FOUND, 'Dismantle event not found'))
     return
   }
 
   const parsed = UpdateEventSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -276,7 +277,7 @@ router.patch('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthReq
   if (outputUpdates !== undefined) {
     for (const u of outputUpdates) {
       if (!existingOutputById.has(u.id)) {
-        res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Output ${u.id} does not belong to this event` })
+        res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.DISMANTLE_OUTPUT_FOREIGN, `Output ${u.id} does not belong to this event`, { id: u.id }))
         return
       }
     }
@@ -320,7 +321,7 @@ router.delete('/:id', auth, requireCap('dismantle_carcass'), asyncHandler<AuthRe
 
   const existing = await prisma.dismantleEvent.findUnique({ where: { id }, include: { outputs: true } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Dismantle event not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.DISMANTLE_EVENT_NOT_FOUND, 'Dismantle event not found'))
     return
   }
 

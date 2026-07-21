@@ -13,6 +13,7 @@ import { effectiveCaps } from '../lib/caps.js'
 import { createPasswordResetToken, findValidToken, invalidateOtherTokens } from '../lib/passwordResetToken.js'
 import { sendPasswordResetEmail } from '../lib/email.js'
 import { frontendUrl } from '../lib/frontendUrl.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -41,7 +42,7 @@ const loginLimiter = rateLimit({
   limit: LOGIN_MAX_ATTEMPTS_PER_WINDOW,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many login attempts. Try again later.' }
+  message: apiError(ERROR_CODES.TOO_MANY_LOGIN_ATTEMPTS, 'Too many login attempts. Try again later.')
 })
 
 // Tech debt (ADR-002), now resolved: the token is set as an httpOnly cookie
@@ -74,7 +75,7 @@ const LoginSchema = z.object({
 router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
   const parsed = LoginSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'email and password required' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.CREDENTIALS_REQUIRED, 'email and password required'))
     return
   }
   const { data } = parsed
@@ -82,13 +83,13 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
 
   const user = await prisma.user.findUnique({ where: { email } })
   if (user === null) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid credentials' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.INVALID_CREDENTIALS, 'Invalid credentials'))
     return
   }
 
   const ok = await bcrypt.compare(password, user.password)
   if (!ok) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid credentials' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.INVALID_CREDENTIALS, 'Invalid credentials'))
     return
   }
 
@@ -97,7 +98,7 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
   // become an oracle telling an attacker which addresses are real accounts.
   // Same reason the "user not found" branch above returns the generic message.
   if (user.bannedAt !== null) {
-    res.status(HTTP_STATUS.FORBIDDEN).json({ error: 'This account has been disabled. Contact an administrator.' })
+    res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ACCOUNT_BANNED, 'This account has been disabled. Contact an administrator.'))
     return
   }
 
@@ -131,12 +132,12 @@ router.post('/logout', (_req, res) => {
 // the cookie to be reissued.
 router.get('/me', auth, asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const current = await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true, caps: true } })
   if (current === null) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   res.json({ ...req.user, role: current.role, caps: effectiveCaps(current.role, current.caps) })
@@ -152,7 +153,7 @@ const forgotPasswordLimiter = rateLimit({
   limit: FORGOT_PASSWORD_MAX_ATTEMPTS_PER_WINDOW,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests. Try again later.' }
+  message: apiError(ERROR_CODES.TOO_MANY_REQUESTS, 'Too many requests. Try again later.')
 })
 
 const ForgotPasswordSchema = z.object({ email: z.string().email() })
@@ -164,7 +165,7 @@ const ForgotPasswordSchema = z.object({ email: z.string().email() })
 router.post('/forgot-password', forgotPasswordLimiter, asyncHandler(async (req, res) => {
   const parsed = ForgotPasswordSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -203,7 +204,7 @@ const ResetPasswordSchema = z.object({
 router.post('/reset-password', asyncHandler(async (req, res) => {
   const parsed = ResetPasswordSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -211,7 +212,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
 
   const record = await findValidToken(token)
   if (record === null) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This link is invalid or has expired. Request a new one.' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.TOKEN_INVALID_OR_EXPIRED, 'This link is invalid or has expired. Request a new one.'))
     return
   }
 

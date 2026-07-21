@@ -3,6 +3,7 @@ import { prisma } from '../lib/db.js'
 import { auth } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 // v2 replan (Phase B.5 — carcass dismantling module). Templates are just
 // data (seeded via prisma/seed.ts — 12 templates across calf/sheep/goat, see
@@ -35,7 +36,7 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
     include: { cuts: true }
   })
   if (template === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Template not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.TEMPLATE_NOT_FOUND, 'Template not found'))
     return
   }
   res.json(template)

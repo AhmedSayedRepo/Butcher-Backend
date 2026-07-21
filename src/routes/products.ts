@@ -10,6 +10,7 @@ import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
 import { getOrCreateSettings } from '../lib/shopSettings.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -37,7 +38,7 @@ router.get('/by-barcode/:code', auth, asyncHandler(async (req, res) => {
   const { code } = params
   const product = await prisma.product.findUnique({ where: { barcode: code } })
   if (product === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'No product with that barcode' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.BARCODE_NOT_FOUND, 'No product with that barcode'))
     return
   }
   res.json(product)
@@ -69,7 +70,7 @@ const CreateProduct = z.object({
 router.post('/', auth, requireCap('manage_inventory'), asyncHandler(async (req, res) => {
   const parsed = CreateProduct.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
 
@@ -126,7 +127,7 @@ async function notifyIfNowLowStock(stockChanged: boolean, product: Product): Pro
 
 router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user } = req
@@ -137,13 +138,13 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
 
   const parsed = UpdateProduct.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
 
   const existing = await prisma.product.findUnique({ where: { id } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Product not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, 'Product not found'))
     return
   }
 
@@ -153,7 +154,7 @@ router.patch('/:id', auth, requireCap('manage_inventory'), asyncHandler<AuthRequ
 
   const reasonError = reasonRequiredError(stockChanged, reason)
   if (reasonError !== null) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: reasonError })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, reasonError))
     return
   }
 

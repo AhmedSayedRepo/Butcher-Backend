@@ -9,6 +9,7 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { getOrCreateSettings } from '../lib/shopSettings.js'
 import { encryptSecret, isEncryptionConfigured } from '../lib/encryption.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -65,7 +66,12 @@ const MIN_SHOP_NAME_LENGTH = 1
 // how you end up serving `javascript:` or `data:text/html` to your own staff.
 // The size ceiling above is a separate concern — this one is about *what* the
 // string is, not how long it is.
-const LOGO_URL_PATTERN = /^(?:https?:\/\/|data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,)/
+// `v` flag per eslint-config-love's require-unicode-regexp. No behaviour
+// change here — the pattern has no character classes, which is where `v`
+// mode's stricter rules apply — but it's the house standard and the linter is
+// right that a regex tested against arbitrary user input should be explicit
+// about its Unicode semantics.
+const LOGO_URL_PATTERN = /^(?:https?:\/\/|data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,)/v
 const LOGO_URL_MESSAGE = 'Logo must be an https:// URL or an uploaded image'
 
 // `null` clears the logo; an empty string is treated the same way by the
@@ -125,7 +131,7 @@ const UpdateShopSettingsSchema = z.object({
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
   const parsed = UpdateShopSettingsSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const current = await getOrCreateSettings()
@@ -133,9 +139,10 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
   const { brevoSenderEmail, brevoApiKey, ...rest } = data
 
   if (brevoApiKey !== undefined && brevoApiKey !== '' && !isEncryptionConfigured()) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: 'SETTINGS_ENCRYPTION_KEY is not configured on the server, so a Brevo API key can\'t be saved here yet. Ask whoever deploys this app to set that env var, or continue using BREVO_API_KEY as an env var for now.'
-    })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(
+      ERROR_CODES.ENCRYPTION_KEY_MISSING,
+      'SETTINGS_ENCRYPTION_KEY is not configured on the server, so a Brevo API key can\'t be saved here yet. Ask whoever deploys this app to set that env var, or continue using BREVO_API_KEY as an env var for now.'
+    ))
     return
   }
 
@@ -162,7 +169,7 @@ const EPOCH = new Date(ZERO)
 // a shop-policy change like PATCH / above.
 router.post('/close-day', auth, requireCap('manage_cash'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user } = req

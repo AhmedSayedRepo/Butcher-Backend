@@ -4,6 +4,7 @@ import { HTTP_STATUS } from '../lib/httpStatus.js'
 import type { AuthRequest } from './auth.js'
 import { roleRank, effectiveCaps } from '../lib/caps.js'
 import type { Cap, Role } from '../lib/caps.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 // Deliberately re-fetches role/caps from the DB on every call rather than
 // trusting the JWT's `role` claim already on `req.user`: the JWT can be
@@ -21,7 +22,7 @@ async function loadCurrentUser(userId: string): Promise<{ role: string, caps: un
 export function requireRole(minRole: Role) {
   return function requireRoleMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
     if (req.user === undefined) {
-      res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+      res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
       return
     }
     // This is already object destructuring; @typescript-eslint/prefer-destructuring
@@ -35,12 +36,12 @@ export function requireRole(minRole: Role) {
     loadCurrentUser(id)
       .then((current) => {
         if (current === null) {
-          res.status(HTTP_STATUS.FORBIDDEN).json({ error: `Requires ${minRole} role or higher` })
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ROLE_REQUIRED, `Requires ${minRole} role or higher`, { role: minRole }))
           return
         }
         const { role } = current
         if (roleRank(role) < roleRank(minRole)) {
-          res.status(HTTP_STATUS.FORBIDDEN).json({ error: `Requires ${minRole} role or higher` })
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ROLE_REQUIRED, `Requires ${minRole} role or higher`, { role: minRole }))
           return
         }
         next()
@@ -52,7 +53,7 @@ export function requireRole(minRole: Role) {
 export function requireCap(cap: Cap) {
   return function requireCapMiddleware(req: AuthRequest, res: Response, next: NextFunction): void {
     if (req.user === undefined) {
-      res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+      res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
       return
     }
     // This is already object destructuring; @typescript-eslint/prefer-destructuring
@@ -66,12 +67,12 @@ export function requireCap(cap: Cap) {
     loadCurrentUser(id)
       .then((current) => {
         if (current === null) {
-          res.status(HTTP_STATUS.FORBIDDEN).json({ error: `Requires capability: ${cap}` })
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.CAP_REQUIRED, `Requires capability: ${cap}`, { cap }))
           return
         }
         const { role, caps } = current
         if (!effectiveCaps(role, caps).includes(cap)) {
-          res.status(HTTP_STATUS.FORBIDDEN).json({ error: `Requires capability: ${cap}` })
+          res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.CAP_REQUIRED, `Requires capability: ${cap}`, { cap }))
           return
         }
         next()

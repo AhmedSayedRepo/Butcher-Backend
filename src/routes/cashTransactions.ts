@@ -8,6 +8,7 @@ import { requireCap } from '../middleware/rbac.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { findIdempotentResponse, storeIdempotentResponse, idempotencyKeyFrom, toIdempotentJson } from '../lib/idempotency.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -52,7 +53,7 @@ const IDEMPOTENCY_ENDPOINT = 'POST /api/cash-transactions'
 // StockAdjustment elsewhere in this codebase.
 router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user, headers } = req
@@ -66,7 +67,7 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
 
   const parsed = CreateCashTransactionSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed

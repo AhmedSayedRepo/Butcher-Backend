@@ -15,6 +15,7 @@ import type { Role } from '../lib/caps.js'
 import { createPasswordResetToken, invalidateOtherTokens } from '../lib/passwordResetToken.js'
 import { sendInviteEmail, sendPasswordResetEmail } from '../lib/email.js'
 import { frontendUrl } from '../lib/frontendUrl.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -63,7 +64,7 @@ const BCRYPT_SALT_ROUNDS = 10
 router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
   const parsed = InviteUserSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -83,7 +84,7 @@ router.post('/', asyncHandler<AuthRequest>(async (req, res) => {
   // (invalidating any old ones), let the role be updated too since the
   // account was never actually activated, and try sending again.
   if (existing?.passwordSet === true) {
-    res.status(HTTP_STATUS.CONFLICT).json({ error: 'A user with that email already exists' })
+    res.status(HTTP_STATUS.CONFLICT).json(apiError(ERROR_CODES.EMAIL_ALREADY_EXISTS, 'A user with that email already exists'))
     return
   }
 
@@ -143,7 +144,7 @@ router.post('/:id/reset-link', asyncHandler<AuthRequest>(async (req, res) => {
     select: { id: true, email: true, passwordSet: true }
   })
   if (user === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'User not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.USER_NOT_FOUND, 'User not found'))
     return
   }
 
@@ -186,7 +187,7 @@ async function wouldLeaveNoAdmin(targetId: string): Promise<boolean> {
 
 function guardTarget(callerId: string, targetId: string, res: Response): boolean {
   if (callerId === targetId) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'You cannot ban or delete your own account.' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.CANNOT_TARGET_SELF, 'You cannot ban or delete your own account.'))
     return false
   }
   return true
@@ -194,7 +195,7 @@ function guardTarget(callerId: string, targetId: string, res: Response): boolean
 
 router.post('/:id/ban', asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user: caller, params } = req
@@ -202,13 +203,13 @@ router.post('/:id/ban', asyncHandler<AuthRequest>(async (req, res) => {
   if (!guardTarget(caller.id, id, res)) return
 
   if (await wouldLeaveNoAdmin(id)) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This is the only active admin — promote someone else first.' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.LAST_ACTIVE_ADMIN, 'This is the only active admin — promote someone else first.'))
     return
   }
 
   const existing = await prisma.user.findUnique({ where: { id }, select: { id: true } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'User not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.USER_NOT_FOUND, 'User not found'))
     return
   }
 
@@ -228,7 +229,7 @@ router.post('/:id/unban', asyncHandler<AuthRequest>(async (req, res) => {
   const { id } = params
   const existing = await prisma.user.findUnique({ where: { id }, select: { id: true } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'User not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.USER_NOT_FOUND, 'User not found'))
     return
   }
   const updated = await prisma.user.update({ where: { id }, data: { bannedAt: null }, select: USER_FIELDS })
@@ -247,7 +248,7 @@ router.post('/:id/unban', asyncHandler<AuthRequest>(async (req, res) => {
 // for the real case it's needed: an invite sent to a mistyped address.
 router.delete('/:id', asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user: caller, params } = req
@@ -267,19 +268,20 @@ router.delete('/:id', asyncHandler<AuthRequest>(async (req, res) => {
     }
   })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'User not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.USER_NOT_FOUND, 'User not found'))
     return
   }
   if (await wouldLeaveNoAdmin(id)) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This is the only active admin — promote someone else first.' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.LAST_ACTIVE_ADMIN, 'This is the only active admin — promote someone else first.'))
     return
   }
 
   const activity = Object.values(existing._count).reduce((sum, n) => sum + n, NO_ACTIVITY)
   if (activity > NO_ACTIVITY) {
-    res.status(HTTP_STATUS.CONFLICT).json({
-      error: 'This user has order, stock or cash history, which must stay attributable. Ban the account instead — it blocks sign-in immediately and keeps the audit trail intact.'
-    })
+    res.status(HTTP_STATUS.CONFLICT).json(apiError(
+      ERROR_CODES.USER_HAS_HISTORY,
+      'This user has order, stock or cash history, which must stay attributable. Ban the account instead — it blocks sign-in immediately and keeps the audit trail intact.'
+    ))
     return
   }
 
@@ -312,7 +314,7 @@ function isSelfDemotion(callerId: string, target: { id: string, role: string }, 
 
 router.patch('/:id', asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   // Already object destructuring in all three cases below; see the comment
@@ -326,7 +328,7 @@ router.patch('/:id', asyncHandler<AuthRequest>(async (req, res) => {
   const { id } = req.params
   const parsed = UpdateUserSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   // eslint-disable-next-line @typescript-eslint/prefer-destructuring -- already destructured; documented false-positive on narrowed optional Express Request properties
@@ -334,7 +336,7 @@ router.patch('/:id', asyncHandler<AuthRequest>(async (req, res) => {
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true } })
   if (target === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'User not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.USER_NOT_FOUND, 'User not found'))
     return
   }
 

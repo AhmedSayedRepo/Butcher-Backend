@@ -9,6 +9,7 @@ import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 import { fireWebhook } from '../lib/webhook.js'
 import { itemsSummary } from '../lib/orderItemsSummary.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 // v3.1 follow-up 6: split out of routes/orders.ts (which was over the
 // max-lines limit) — mounted on the same '/api/orders' prefix as that
@@ -32,7 +33,7 @@ const ScanReceiptSchema = z.object({
 // of silently completing a different order.
 router.post('/:id/scan-receipt', auth, requireCap('manage_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user, params } = req
@@ -40,7 +41,7 @@ router.post('/:id/scan-receipt', auth, requireCap('manage_orders'), asyncHandler
 
   const parsed = ScanReceiptSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -51,15 +52,15 @@ router.post('/:id/scan-receipt', auth, requireCap('manage_orders'), asyncHandler
     include: { items: { include: { product: true } } }
   })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.ORDER_NOT_FOUND, 'Order not found'))
     return
   }
   if (existing.status !== OrderStatus.ON_THE_WAY) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Only on-the-way orders can be confirmed by scanning the receipt' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.RECEIPT_SCAN_WRONG_STATUS, 'Only on-the-way orders can be confirmed by scanning the receipt'))
     return
   }
   if (existing.receiptCode?.toUpperCase() !== code.trim().toUpperCase()) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Receipt code does not match this order' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.RECEIPT_CODE_MISMATCH, 'Receipt code does not match this order'))
     return
   }
 

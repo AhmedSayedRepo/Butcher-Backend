@@ -9,6 +9,7 @@ import cookieParser from 'cookie-parser'
 import morgan from 'morgan'
 import helmet from 'helmet'
 import { prisma } from './lib/db.js'
+import { apiError, ERROR_CODES } from './lib/errorCodes.js'
 import products from './routes/products.js'
 import orders from './routes/orders.js'
 import orderReceiptScan from './routes/orderReceiptScan.js'
@@ -126,7 +127,7 @@ app.use('/webhooks/whatsapp', whatsappWebhookRouter)
 // Express identifies error-handling middleware by its 4-argument signature
 // — the unused params must stay positional even though only err/res are read.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ error: getErrorMessage(err) })
+  res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json(apiError(ERROR_CODES.SERVER_ERROR, getErrorMessage(err)))
 })
 
 const port = Number(process.env.PORT ?? DEFAULT_PORT)

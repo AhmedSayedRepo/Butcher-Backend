@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { prisma } from '../lib/db.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const BEARER_PREFIX = 'Bearer '
 
@@ -93,13 +94,13 @@ function verifyToken(token: string): AuthTokenPayload | null {
 export function auth(req: AuthRequest, res: Response, next: NextFunction): void {
   const token = extractToken(req)
   if (token === null) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
 
   const payload = verifyToken(token)
   if (payload === null) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid token' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.TOKEN_INVALID_OR_EXPIRED, 'Invalid token'))
     return
   }
   const { id, email, role } = payload
@@ -108,11 +109,11 @@ export function auth(req: AuthRequest, res: Response, next: NextFunction): void 
     .then((current) => {
       // Deleted account: the token is signed and unexpired but the row is gone.
       if (current === null) {
-        res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid token' })
+        res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.TOKEN_INVALID_OR_EXPIRED, 'Invalid token'))
         return
       }
       if (current.bannedAt !== null) {
-        res.status(HTTP_STATUS.FORBIDDEN).json({ error: 'This account has been disabled. Contact an administrator.' })
+        res.status(HTTP_STATUS.FORBIDDEN).json(apiError(ERROR_CODES.ACCOUNT_BANNED, 'This account has been disabled. Contact an administrator.'))
         return
       }
       Object.assign(req, { user: { id, email, role } })

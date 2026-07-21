@@ -10,6 +10,7 @@ import { requireCap } from '../middleware/rbac.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 // v3.1 follow-up 7 — editable drafts.
 //
@@ -80,7 +81,7 @@ async function fullOrder(id: string): Promise<OrderWithProducts> {
 // one is the same authority.
 router.patch('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { params } = req
@@ -88,20 +89,21 @@ router.patch('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest
 
   const parsed = EditDraftSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
 
   const existing = await loadDraft(id)
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.ORDER_NOT_FOUND, 'Order not found'))
     return
   }
   if (existing.status !== OrderStatus.DRAFT) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: 'Only draft orders can be edited. Confirmed orders have already moved stock — cancel it instead.'
-    })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(
+      ERROR_CODES.ORDER_NOT_DRAFT_EDIT,
+      'Only draft orders can be edited. Confirmed orders have already moved stock — cancel it instead.'
+    ))
     return
   }
 
@@ -120,7 +122,7 @@ router.patch('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest
     const productMap = new Map(products.map((p) => [p.id, p]))
     for (const it of items) {
       if (!productMap.has(it.productId)) {
-        res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Product not found: ${it.productId}` })
+        res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, `Product not found: ${it.productId}`, { id: it.productId }))
         return
       }
     }
@@ -165,7 +167,7 @@ router.patch('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest
 // board and the reports for no informational gain.
 router.delete('/:id', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { params } = req
@@ -173,13 +175,14 @@ router.delete('/:id', auth, requireCap('create_orders'), asyncHandler<AuthReques
 
   const existing = await loadDraft(id)
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.ORDER_NOT_FOUND, 'Order not found'))
     return
   }
   if (existing.status !== OrderStatus.DRAFT) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: 'Only draft orders can be deleted. Cancel a confirmed order instead.'
-    })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(
+      ERROR_CODES.ORDER_NOT_DRAFT_DELETE,
+      'Only draft orders can be deleted. Cancel a confirmed order instead.'
+    ))
     return
   }
 

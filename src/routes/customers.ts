@@ -6,6 +6,7 @@ import type { AuthRequest } from '../middleware/auth.js'
 import { requireCap } from '../middleware/rbac.js'
 import { asyncHandler } from '../lib/asyncHandler.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -51,7 +52,7 @@ router.get('/:id', auth, asyncHandler(async (req, res) => {
     include: { orders: { orderBy: { createdAt: 'desc' }, include: { items: true } } }
   })
   if (customer === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Customer not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.CUSTOMER_NOT_FOUND, 'Customer not found'))
     return
   }
   const { orders, ...rest } = customer
@@ -84,7 +85,7 @@ const CustomerSchema = z.object({
 router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   const parsed = CustomerSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -103,12 +104,12 @@ router.patch('/:id', auth, requireCap('manage_orders'), asyncHandler(async (req,
   const { id } = params
   const parsed = UpdateCustomerSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const existing = await prisma.customer.findUnique({ where: { id } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Customer not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.CUSTOMER_NOT_FOUND, 'Customer not found'))
     return
   }
   const { data } = parsed
@@ -131,12 +132,12 @@ router.delete('/:id', auth, requireCap('manage_orders'), asyncHandler(async (req
   const { id } = params
   const parsed = DeleteCustomerSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Deleting a customer requires { confirm: true } in the request body' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.CONFIRMATION_REQUIRED, 'Deleting a customer requires { confirm: true } in the request body'))
     return
   }
   const existing = await prisma.customer.findUnique({ where: { id } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Customer not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.CUSTOMER_NOT_FOUND, 'Customer not found'))
     return
   }
   await prisma.customer.delete({ where: { id } })

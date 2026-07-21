@@ -14,6 +14,7 @@ import { nextDailyOrderNumber } from '../lib/dailyOrderNumber.js'
 import { getOrCreateSettings } from '../lib/shopSettings.js'
 import { generateReceiptCode } from '../lib/receiptCode.js'
 import { itemsSummary } from '../lib/orderItemsSummary.js'
+import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
 
 const router = Router()
 
@@ -148,7 +149,7 @@ const CREATE_ORDER_ENDPOINT = 'POST /api/orders'
 // doesn't — so no existing account loses the till.
 router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user, headers } = req
@@ -166,7 +167,7 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
 
   const parsed = CreateOrderSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
 
@@ -200,12 +201,12 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
   for (const it of items) {
     const p = productMap.get(it.productId)
     if (p === undefined) {
-      res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Product not found: ${it.productId}` })
+      res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, `Product not found: ${it.productId}`, { id: it.productId }))
       return
     }
     if (Number(p.stockKg) < it.kg) {
       res.status(HTTP_STATUS.BAD_REQUEST).json({
-        error: `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`
+        ...apiError(ERROR_CODES.INSUFFICIENT_STOCK, `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`, { name: p.name, available: p.stockKg.toString() })
       })
       return
     }
@@ -302,7 +303,7 @@ const CREATE_DRAFT_ENDPOINT = 'POST /api/orders/draft'
 
 router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user, headers } = req
@@ -316,7 +317,7 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
 
   const parsed = CreateOrderSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -328,7 +329,7 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
 
   for (const it of items) {
     if (!productMap.has(it.productId)) {
-      res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Product not found: ${it.productId}` })
+      res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, `Product not found: ${it.productId}`, { id: it.productId }))
       return
     }
   }
@@ -386,7 +387,7 @@ const PROMOTE_ORDER_ENDPOINT = 'POST /api/orders/:id/promote'
 
 router.post('/:id/promote', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user, headers } = req
@@ -406,11 +407,11 @@ router.post('/:id/promote', auth, requireCap('create_orders'), asyncHandler<Auth
 
   const existing = await prisma.order.findUnique({ where: { id }, include: { items: true } })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.ORDER_NOT_FOUND, 'Order not found'))
     return
   }
   if (existing.status !== OrderStatus.DRAFT) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Only draft orders can be promoted' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.ORDER_NOT_DRAFT_PROMOTE, 'Only draft orders can be promoted'))
     return
   }
 
@@ -421,12 +422,12 @@ router.post('/:id/promote', auth, requireCap('create_orders'), asyncHandler<Auth
   for (const it of existing.items) {
     const p = productMap.get(it.productId)
     if (p === undefined) {
-      res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Product not found: ${it.productId}` })
+      res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, `Product not found: ${it.productId}`, { id: it.productId }))
       return
     }
     if (Number(p.stockKg) < Number(it.kg)) {
       res.status(HTTP_STATUS.BAD_REQUEST).json({
-        error: `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`
+        ...apiError(ERROR_CODES.INSUFFICIENT_STOCK, `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`, { name: p.name, available: p.stockKg.toString() })
       })
       return
     }
@@ -493,7 +494,7 @@ const UpdateStatusSchema = z.object({
 // an order's fulfillment status is a step up from just creating one.
 router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<AuthRequest>(async (req, res) => {
   if (req.user === undefined) {
-    res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Unauthorized' })
+    res.status(HTTP_STATUS.UNAUTHORIZED).json(apiError(ERROR_CODES.UNAUTHORIZED, 'Unauthorized'))
     return
   }
   const { user } = req
@@ -502,7 +503,7 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
 
   const parsed = UpdateStatusSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: parsed.error.flatten() })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
   const { data } = parsed
@@ -510,7 +511,7 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
   const { [nextStatusKey]: nextStatus } = OrderStatus
 
   if (!PROMOTABLE_STATUSES.includes(nextStatus)) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: `Cannot set status to ${nextStatus} here` })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.STATUS_NOT_ALLOWED, `Cannot set status to ${nextStatus} here`, { status: nextStatus }))
     return
   }
 
@@ -519,15 +520,15 @@ router.patch('/:id/status', auth, requireCap('manage_orders'), asyncHandler<Auth
     include: { items: { include: { product: true } } }
   })
   if (existing === null) {
-    res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Order not found' })
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.ORDER_NOT_FOUND, 'Order not found'))
     return
   }
   if (existing.status === OrderStatus.DRAFT) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Promote the draft first with POST /:id/promote' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.ORDER_IS_DRAFT, 'Promote the draft first with POST /:id/promote'))
     return
   }
   if (existing.status === OrderStatus.CANCELLED) {
-    res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'This order is cancelled' })
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.ORDER_CANCELLED, 'This order is cancelled'))
     return
   }
   // v3.1 follow-up 6: COMPLETED is reachable here only from IN_PREMISE — a
