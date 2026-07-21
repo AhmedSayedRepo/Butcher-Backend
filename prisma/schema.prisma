@@ -147,6 +147,39 @@ model ShopSettings {
   // BREVO_API_KEY env vars when unset.
   brevoSenderEmail          String?
   brevoApiKeyEncrypted      String?
+  // v3.1 follow-up 10 — printed-receipt customization (/settings). Every
+  // field here only affects the printed output on /orders/new; none of it
+  // changes what's stored on an order.
+  //
+  // Width/height are millimetres because that's how thermal paper is sold
+  // (57mm and 80mm rolls are the common ones) and how the print CSS needs
+  // them. `receiptHeightMm` is nullable and means "as long as the content
+  // needs" — the normal case for a continuous roll with no page break;
+  // a number is only useful for pre-cut / fixed-length stationery.
+  //
+  // The `receiptShow*` booleans decide which already-existing pieces of
+  // information get printed. They're individual columns rather than one JSON
+  // blob so they stay queryable and so a typo in a key name is a compile
+  // error instead of a silently-ignored setting.
+  receiptWidthMm      Int      @default(80)
+  receiptHeightMm     Int?
+  receiptFontScale    Decimal  @default(1) @db.Decimal(3, 2)
+  receiptHeaderText   String?  @db.Text
+  receiptFooterText   String?  @db.Text
+  receiptLogoUrl      String?  @db.Text
+  receiptShowShopName Boolean  @default(true)
+  receiptShowPhone    Boolean  @default(true)
+  receiptShowAddress  Boolean  @default(true)
+  receiptShowOrderNo  Boolean  @default(true)
+  receiptShowCode     Boolean  @default(true)
+  receiptShowCashier  Boolean  @default(false)
+  receiptShowDateTime Boolean  @default(true)
+  // The shop's own contact details, printed on the receipt when the toggles
+  // above are on. They had no home before this — the app knew the shop's
+  // name only as a hardcoded UI string.
+  shopName            String   @default("Butcher Cashier")
+  shopPhone           String?
+  shopAddress         String?  @db.Text
 }
 
 // v3 replan — idempotency guard for order-creation and cash-transaction

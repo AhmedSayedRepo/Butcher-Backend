@@ -42,6 +42,16 @@ router.get('/', auth, asyncHandler(async (_req, res) => {
 const MIN_ALERT_MINUTES = 1
 const MIN_LOW_STOCK_THRESHOLD_KG = 0
 const MIN_MAIL_SENDER_NAME_LENGTH = 1
+// v3.1 follow-up 10 — receipt customization bounds. See the schema comments
+// on UpdateShopSettingsSchema below for why each range is what it is.
+const MIN_RECEIPT_WIDTH_MM = 40
+const MAX_RECEIPT_WIDTH_MM = 210
+const MIN_RECEIPT_HEIGHT_MM = 40
+const MAX_RECEIPT_HEIGHT_MM = 2000
+const MIN_RECEIPT_FONT_SCALE = 0.6
+const MAX_RECEIPT_FONT_SCALE = 2
+const MAX_RECEIPT_TEXT_LENGTH = 2000
+const MIN_SHOP_NAME_LENGTH = 1
 
 // v3.1 follow-up 5 (Settings page): defaultLowStockThresholdKg/mailSenderName
 // added alongside the existing Phase J fields — same single-row shop-policy
@@ -58,7 +68,28 @@ const UpdateShopSettingsSchema = z.object({
   defaultLowStockThresholdKg: z.number().gt(MIN_LOW_STOCK_THRESHOLD_KG).optional(),
   mailSenderName: z.string().min(MIN_MAIL_SENDER_NAME_LENGTH).optional(),
   brevoSenderEmail: z.string().optional(),
-  brevoApiKey: z.string().optional()
+  brevoApiKey: z.string().optional(),
+  // v3.1 follow-up 10 — receipt customization. Bounds are deliberately wide
+  // but not unbounded: a width outside 40–210mm is a typo rather than a real
+  // printer (57mm and 80mm are the common thermal rolls; 210mm is A4), and a
+  // font scale outside 0.6–2 produces a receipt that's unreadable or wastes
+  // half a roll per sale.
+  receiptWidthMm: z.number().int().min(MIN_RECEIPT_WIDTH_MM).max(MAX_RECEIPT_WIDTH_MM).optional(),
+  receiptHeightMm: z.number().int().min(MIN_RECEIPT_HEIGHT_MM).max(MAX_RECEIPT_HEIGHT_MM).nullable().optional(),
+  receiptFontScale: z.number().min(MIN_RECEIPT_FONT_SCALE).max(MAX_RECEIPT_FONT_SCALE).optional(),
+  receiptHeaderText: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  receiptFooterText: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  receiptLogoUrl: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  receiptShowShopName: z.boolean().optional(),
+  receiptShowPhone: z.boolean().optional(),
+  receiptShowAddress: z.boolean().optional(),
+  receiptShowOrderNo: z.boolean().optional(),
+  receiptShowCode: z.boolean().optional(),
+  receiptShowCashier: z.boolean().optional(),
+  receiptShowDateTime: z.boolean().optional(),
+  shopName: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional(),
+  shopPhone: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional()
 })
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
