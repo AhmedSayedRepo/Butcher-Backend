@@ -46,6 +46,7 @@ const EditDraftSchema = z.object({
   customerId: z.string().nullable().optional(),
   customerMessage: z.string().nullable().optional(),
   deliveryAddress: z.string().nullable().optional(),
+  deliveryName: z.string().nullable().optional(),
   // Not nullable, unlike the others: `paymentMethod` is a non-null column with
   // a "cash" default, so it can be changed but never cleared.
   paymentMethod: z.string().optional(),
@@ -136,6 +137,7 @@ router.patch('/:id', auth, asyncHandler<AuthRequest>(async (req, res) => {
         customerId: data.customerId,
         customerMessage: data.customerMessage,
         deliveryAddress: data.deliveryAddress,
+        deliveryName: data.deliveryName,
         paymentMethod: data.paymentMethod,
         ...(total === undefined ? {} : { totalAmount: total })
       }

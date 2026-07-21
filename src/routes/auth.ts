@@ -92,6 +92,15 @@ router.post('/login', loginLimiter, asyncHandler(async (req, res) => {
     return
   }
 
+  // v3.1 follow-up 10c: checked AFTER the password comparison on purpose. If a
+  // banned account failed fast with a distinct message, the login form would
+  // become an oracle telling an attacker which addresses are real accounts.
+  // Same reason the "user not found" branch above returns the generic message.
+  if (user.bannedAt !== null) {
+    res.status(HTTP_STATUS.FORBIDDEN).json({ error: 'This account has been disabled. Contact an administrator.' })
+    return
+  }
+
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, requireEnv('JWT_SECRET'), { expiresIn: '7d' })
   res.cookie(AUTH_COOKIE_NAME, token, cookieOptions())
   res.json({ user: { id: user.id, email: user.email, role: user.role } })

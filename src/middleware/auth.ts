@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
+import { prisma } from '../lib/db.js'
 import { HTTP_STATUS } from '../lib/httpStatus.js'
 
 const BEARER_PREFIX = 'Bearer '
@@ -65,6 +66,30 @@ function extractToken(req: Request): string | null {
   return header.startsWith(BEARER_PREFIX) ? header.slice(BEARER_PREFIX.length) : null
 }
 
+// Verify + narrow in one place, returning null for both failure modes. Written
+// as a helper rather than inline because a `let` here can't satisfy both
+// `init-declarations` (wants an initialiser) and `no-useless-assignment` (says
+// that initialiser is never read) at the same time — a function with two
+// returns sidesteps the conflict instead of picking which rule to suppress.
+function verifyToken(token: string): AuthTokenPayload | null {
+  try {
+    const decoded: unknown = jwt.verify(token, requireEnv('JWT_SECRET'))
+    return isAuthTokenPayload(decoded) ? decoded : null
+  } catch {
+    return null
+  }
+}
+
+// v3.1 follow-up 10c: a ban has to take effect NOW, not whenever the banned
+// user's 7-day JWT happens to expire — someone being cut off is usually being
+// cut off for a reason that won't wait a week. That means one primary-key
+// lookup per authenticated request, which is the real cost of this feature and
+// is accepted deliberately: it's an indexed single-row read, and nearly every
+// route in this app already queries the database anyway.
+//
+// Checked here rather than in requireRole/requireCap because those only guard
+// *some* routes — a banned user would still have been able to read orders,
+// inventory and the dashboard, which are behind plain `auth`.
 export function auth(req: AuthRequest, res: Response, next: NextFunction): void {
   const token = extractToken(req)
   if (token === null) {
@@ -72,15 +97,26 @@ export function auth(req: AuthRequest, res: Response, next: NextFunction): void 
     return
   }
 
-  try {
-    const decoded: unknown = jwt.verify(token, requireEnv('JWT_SECRET'))
-    if (!isAuthTokenPayload(decoded)) {
-      res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid token' })
-      return
-    }
-    Object.assign(req, { user: { id: decoded.id, email: decoded.email, role: decoded.role } })
-    next()
-  } catch {
+  const payload = verifyToken(token)
+  if (payload === null) {
     res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid token' })
+    return
   }
+  const { id, email, role } = payload
+
+  prisma.user.findUnique({ where: { id }, select: { bannedAt: true } })
+    .then((current) => {
+      // Deleted account: the token is signed and unexpired but the row is gone.
+      if (current === null) {
+        res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: 'Invalid token' })
+        return
+      }
+      if (current.bannedAt !== null) {
+        res.status(HTTP_STATUS.FORBIDDEN).json({ error: 'This account has been disabled. Contact an administrator.' })
+        return
+      }
+      Object.assign(req, { user: { id, email, role } })
+      next()
+    })
+    .catch(next)
 }

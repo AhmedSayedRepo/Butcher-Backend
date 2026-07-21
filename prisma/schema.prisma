@@ -27,6 +27,13 @@ model User {
   // (and the seeded admin) is unaffected. Purely a UI/status flag — actual
   // login is gated by whether the stored hash matches, not this field.
   passwordSet Boolean @default(true)
+  // v3.1 follow-up 10c — banned accounts. A timestamp rather than a boolean so
+  // the audit question "when were they cut off?" is answerable; null means
+  // active. Enforced at LOGIN and on every authenticated request (see
+  // middleware/rbac.ts's loadUser) rather than only at login, so banning
+  // someone who is already signed in takes effect immediately instead of
+  // whenever their 7-day JWT happens to expire.
+  bannedAt  DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -180,6 +187,10 @@ model ShopSettings {
   receiptShowItems    Boolean  @default(true)
   receiptShowCustomer Boolean  @default(true)
   receiptShowAddressOfCustomer Boolean @default(false)
+  // v3.1 follow-up 10b: what this shop calls the person who takes a delivery
+  // out — "Driver", "Courier", "Delivery", a name in Arabic. Only a display
+  // label; the per-order value lives on Order.deliveryName.
+  deliveryNameLabel String @default("Delivery")
   // The shop's own contact details, printed on the receipt when the toggles
   // above are on. They had no home before this — the app knew the shop's
   // name only as a hardcoded UI string.
@@ -299,6 +310,14 @@ model Order {
   // pre-migration order rows have none, and DRAFT rows never get one at
   // all (nothing to scan for an order that hasn't happened yet).
   receiptCode String? @unique
+  // v3.1 follow-up 10b: who is physically taking this order out — the driver
+  // or courier. Free text rather than a User relation: deliveries are often
+  // handed to someone who has no login (a relative, a hired bike). Shown on
+  // the board and in the order detail, deliberately NOT on the printed
+  // receipt — it's internal dispatch information, not something the customer
+  // needs. The *label* for it is shop-configurable (ShopSettings
+  // .deliveryNameLabel) because shops call this role different things.
+  deliveryName String?
   createdAt   DateTime    @default(now())
   userId      String
   user        User        @relation(fields: [userId], references: [id])

@@ -77,6 +77,7 @@ const CreateOrderSchema = z.object({
   // v3 replan (Phase I.3 — phone delivery orders). Null/omitted for every
   // other source.
   deliveryAddress: z.string().optional(),
+  deliveryName: z.string().optional(),
   // v3 replan (Phase K — cash management). Defaults to "cash" so every
   // pre-v3 order-creation call (no body change required) still gets a
   // correct value.
@@ -120,9 +121,20 @@ router.get('/', auth, asyncHandler(async (req, res) => {
   // v3.1 follow-up 6: items now include their `product` relation (just
   // name/unit worth of data added on the wire) so the order-detail popup
   // can show real product names instead of only productId/kg/price.
+  // v3.1 follow-up 10a: `customerRecord` joined (name/phone/address only) so a
+  // printed receipt can label the customer's phone and address. The order's own
+  // free-text `customer` and per-order `deliveryAddress` still win where set —
+  // this is the fallback for an order linked to a real Customer.
   const orders = await prisma.order.findMany({
     where,
-    include: { items: { include: { product: true } } },
+    include: {
+      items: { include: { product: true } },
+      customerRecord: { select: { id: true, name: true, phone: true, address: true } },
+      // v3.1 follow-up 10b: the board shows how long a delivery has been out,
+      // which needs the moment it entered ON_THE_WAY — not `createdAt`. These
+      // rows already existed as the audit trail; they just weren't on the wire.
+      statusEvents: { select: { status: true, createdAt: true }, orderBy: { createdAt: 'asc' } }
+    },
     orderBy: { createdAt: 'desc' }
   })
   res.json(orders)

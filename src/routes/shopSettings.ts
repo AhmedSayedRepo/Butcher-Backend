@@ -92,7 +92,9 @@ const UpdateShopSettingsSchema = z.object({
   receiptShowAddressOfCustomer: z.boolean().optional(),
   shopName: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional(),
   shopPhone: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
-  shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional()
+  shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
+  // v3.1 follow-up 10b — display label only; the value is per-order.
+  deliveryNameLabel: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional()
 })
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
