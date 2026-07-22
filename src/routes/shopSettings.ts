@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { OrderStatus, CashTransactionType } from '@prisma/client'
+import { OrderStatus, CashTransactionType, type Prisma } from '@prisma/client'
 import { prisma } from '../lib/db.js'
+import { parseScaleBarcode, ScaleBarcodeConfigSchema } from '../lib/scaleBarcode.js'
 import { auth } from '../middleware/auth.js'
 import type { AuthRequest } from '../middleware/auth.js'
 import { requireRole, requireCap } from '../middleware/rbac.js'
@@ -125,7 +126,11 @@ const UpdateShopSettingsSchema = z.object({
   shopPhone: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
   shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
   // v3.1 follow-up 10b — display label only; the value is per-order.
-  deliveryNameLabel: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional()
+  deliveryNameLabel: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional(),
+  // v3.3 — the whole scale-barcode scheme, validated as one object. Turning
+  // the feature off is `enabled: false` inside the config, not clearing it, so
+  // this never needs to write a JSON null (which Prisma handles specially).
+  scaleBarcodeConfig: ScaleBarcodeConfigSchema.optional()
 })
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
@@ -136,7 +141,7 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
   }
   const current = await getOrCreateSettings()
   const { data } = parsed
-  const { brevoSenderEmail, brevoApiKey, ...rest } = data
+  const { brevoSenderEmail, brevoApiKey, scaleBarcodeConfig, ...rest } = data
 
   if (brevoApiKey !== undefined && brevoApiKey !== '' && !isEncryptionConfigured()) {
     res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(
@@ -151,10 +156,50 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
     data: {
       ...rest,
       ...(brevoSenderEmail === undefined ? {} : { brevoSenderEmail: brevoSenderEmail === '' ? null : brevoSenderEmail }),
-      ...(brevoApiKey === undefined ? {} : { brevoApiKeyEncrypted: brevoApiKey === '' ? null : encryptSecret(brevoApiKey) })
+      ...(brevoApiKey === undefined ? {} : { brevoApiKeyEncrypted: brevoApiKey === '' ? null : encryptSecret(brevoApiKey) }),
+      // A validated config object is a plain JSON structure; the assertion is
+      // only to satisfy Prisma's `InputJsonValue`, which a named object type
+      // doesn't structurally match without an index signature.
+      ...(scaleBarcodeConfig === undefined ? {} : { scaleBarcodeConfig: scaleBarcodeConfig as Prisma.InputJsonValue })
     }
   })
   res.json(toClientSettings(updated))
+}))
+
+// v3.3 — the live "paste a sample barcode" tester behind the scale settings.
+// Runs the REAL parser against the config being edited (which may be unsaved),
+// so what the admin sees in the tester is exactly what a scan will do. Also
+// reports which product the parsed item code maps to, so a wrong position
+// shows up as "matched the wrong product" rather than a silent success.
+const ScaleTestSchema = z.object({
+  config: ScaleBarcodeConfigSchema,
+  sample: z.string()
+})
+
+router.post('/scale-barcode/test', auth, requireRole('admin'), asyncHandler(async (req, res) => {
+  const parsed = ScaleTestSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
+    return
+  }
+  // `parsed.data` is a member expression, and prefer-destructuring won't
+  // destructure from one — bind it to an identifier first (as the PATCH
+  // handler above does).
+  const { data } = parsed
+  const { config, sample } = data
+  const result = parseScaleBarcode(sample, config)
+  if (result === null) {
+    res.json({ matched: false })
+    return
+  }
+  const product = await prisma.product.findFirst({ where: { scaleItemCode: result.itemCode } })
+  res.json({
+    matched: true,
+    itemCode: result.itemCode,
+    value: result.value,
+    valueType: result.valueType,
+    productName: product?.name ?? null
+  })
 }))
 
 const ZERO = 0

@@ -322,6 +322,12 @@ model ShopSettings {
   shopName            String   @default("Butcher Cashier")
   shopPhone           String?
   shopAddress         String?  @db.Text
+  // v3.3 — the weighing-scale barcode scheme (see lib/scaleBarcode.ts). A JSON
+  // blob rather than a column per field: it's a single structured config edited
+  // and saved as one unit, validated by zod on write, and keeping it to one
+  // nullable column means the migration is a single additive ALTER. Null =
+  // scale barcodes not configured (the default).
+  scaleBarcodeConfig  Json?
   // Multi-tenancy phase 1 — nullable for now, see the Organization model.
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id])
@@ -372,6 +378,12 @@ model Product {
   // product. Postgres treats NULLs as distinct, so unbarcoded products are
   // unaffected.
   barcode         String?
+  // v3.3 — the item/PLU code a weighing scale embeds in its printed labels.
+  // Separate from `barcode`: `barcode` is the whole static code a handheld
+  // reads off a shelf tag, whereas a scale label's code changes every print
+  // (the weight is baked in) and only its *item* segment identifies the
+  // product. Nullable + unique-per-org for the same reasons as `barcode`.
+  scaleItemCode   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -384,6 +396,7 @@ model Product {
 
   @@index([organizationId])
   @@unique([organizationId, barcode])
+  @@unique([organizationId, scaleItemCode])
 }
 
 // v2 replan (Phase C — order kanban). DRAFT = saved but not yet promoted

@@ -11,6 +11,7 @@ import { fireWebhook } from '../lib/webhook.js'
 import { isLowStock } from '../lib/lowStock.js'
 import { getOrCreateSettings } from '../lib/shopSettings.js'
 import { apiError, ERROR_CODES } from '../lib/errorCodes.js'
+import { parseScaleBarcode, ScaleBarcodeConfigSchema, type ScaleParseResult } from '../lib/scaleBarcode.js'
 
 const router = Router()
 
@@ -47,6 +48,63 @@ router.get('/by-barcode/:code', auth, asyncHandler(async (req, res) => {
   res.json(product)
 }))
 
+// v3.3 — the scan endpoint the New Order page now uses. It supersedes
+// /by-barcode by handling weighing-scale labels as well as plain barcodes:
+//
+//   1. If a scale scheme is configured and the code parses as a scale label,
+//      look the product up by its embedded item code and resolve the measured
+//      quantity — a weight directly, or a weight derived from an embedded price
+//      (kg = price ÷ the product's own price-per-kg).
+//   2. Otherwise fall back to a plain product-barcode lookup, exactly as
+//      before.
+//
+// Returns `{ product, kg, mode }`: `kg` is null for a plain barcode (the client
+// adds it at its default weight), a number for a scale label. Keeping the parse
+// server-side means the scheme and the product lookup live in one place, and no
+// scale config is ever shipped to the browser.
+const NO_PRICE = 0
+
+function resolveScaleKg(parsed: ScaleParseResult, pricePerKg: number): number | null {
+  if (parsed.valueType === 'weight') return parsed.value
+  // Price mode: the label carries the total price, so the weight is that
+  // price over the product's own rate. Guard the divide — a product with no
+  // rate can't be priced this way.
+  if (pricePerKg <= NO_PRICE) return null
+  return parsed.value / pricePerKg
+}
+
+router.get('/scan/:code', auth, asyncHandler(async (req, res) => {
+  const { params } = req
+  const { code } = params
+  const settings = await getOrCreateSettings()
+  const configResult = ScaleBarcodeConfigSchema.safeParse(settings.scaleBarcodeConfig)
+
+  if (configResult.success && configResult.data.enabled) {
+    const parsed = parseScaleBarcode(code, configResult.data)
+    if (parsed !== null) {
+      const product = await prisma.product.findFirst({ where: { scaleItemCode: parsed.itemCode } })
+      if (product === null) {
+        res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.SCALE_ITEM_NOT_FOUND, 'No product matches that scale item code', { itemCode: parsed.itemCode }))
+        return
+      }
+      const kg = resolveScaleKg(parsed, Number(product.pricePerKg))
+      if (kg === null) {
+        res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.SCALE_PRICE_UNRESOLVABLE, 'Cannot derive a weight: this product has no price per kg', { name: product.name }))
+        return
+      }
+      res.json({ product, kg, mode: parsed.valueType })
+      return
+    }
+  }
+
+  const product = await prisma.product.findFirst({ where: { barcode: code } })
+  if (product === null) {
+    res.status(HTTP_STATUS.NOT_FOUND).json(apiError(ERROR_CODES.BARCODE_NOT_FOUND, 'No product with that barcode'))
+    return
+  }
+  res.json({ product, kg: null, mode: 'plain' })
+}))
+
 const MIN_NAME_LENGTH = 1
 
 const CreateProduct = z.object({
@@ -60,7 +118,10 @@ const CreateProduct = z.object({
   // Lookup-only in this phase — no barcode *generation* feature, since the
   // v3 plan's open question 2 (self-printed vs. supplier-printed) was never
   // answered; lookup-only is the strict subset that's correct either way.
-  barcode: z.string().min(MIN_NAME_LENGTH).optional()
+  barcode: z.string().min(MIN_NAME_LENGTH).optional(),
+  // v3.3 — the scale item/PLU code (see lib/scaleBarcode.ts). Same optional
+  // shape as barcode.
+  scaleItemCode: z.string().min(MIN_NAME_LENGTH).optional()
 })
 
 // v2 replan (Phase B): creating/editing products is exactly what the
@@ -98,6 +159,7 @@ const UpdateProduct = z.object({
   stockKg: z.number().nonnegative().optional(),
   lowStockAlertKg: z.number().nonnegative().optional(),
   barcode: z.string().min(MIN_NAME_LENGTH).optional(),
+  scaleItemCode: z.string().min(MIN_NAME_LENGTH).optional(),
   reason: z.string().min(MIN_NAME_LENGTH).optional()
 })
 

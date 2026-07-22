@@ -20,6 +20,7 @@ import { isValidSlug, subdomainMismatch, isBlockedByBilling, requestedSlug } fro
 import { buildOriginChecker } from '../src/lib/corsOrigin.js'
 import { sessionHours, sessionExpiresIn, shouldRenew } from '../src/lib/session.js'
 import { samePhone } from '../src/lib/phoneMatch.js'
+import { parseScaleBarcode, type ScaleBarcodeConfig } from '../src/lib/scaleBarcode.js'
 
 let pass = 0, fail = 0
 function t(name: string, got: unknown, want: unknown) {
@@ -159,6 +160,38 @@ t('phone: null never matches', samePhone(waNumber, null), false)
 t('phone: empty never matches', samePhone(waNumber, ''), false)
 t('phone: two nulls do not match', samePhone(null, null), false)
 t('phone: letters stripped, still matches', samePhone(waNumber, 'tel: 0101-818-5200'), true)
+
+// ── Scale (variable-measure) barcode parsing (v3.3) ─────────────────────────
+console.log('')
+
+// EAN-13, prefix 2, item at digits 2–6, weight in grams at digits 8–12.
+const scaleWeight: ScaleBarcodeConfig = {
+  enabled: true, prefix: '2', totalLength: 13,
+  itemStart: 2, itemLength: 5, valueStart: 8, valueLength: 5,
+  valueType: 'weight', valueDivisor: 1000, validateCheckDigit: false
+}
+const scalePrice: ScaleBarcodeConfig = { ...scaleWeight, valueType: 'price', valueDivisor: 100 }
+const scaleCheck: ScaleBarcodeConfig = { ...scaleWeight, prefix: '4', validateCheckDigit: true }
+
+// 2 01234 0 01250 0  → item 01234, weight 01250/1000 = 1.250 kg
+const wl = parseScaleBarcode('2012340012500', scaleWeight)
+t('scale: weight item code', wl?.itemCode, '01234')
+t('scale: weight value', wl?.value.toFixed(3), '1.250')
+t('scale: weight type', wl?.valueType, 'weight')
+
+// 2 01234 0 04599 0  → price 04599/100 = 45.99
+const pr = parseScaleBarcode('2012340045990', scalePrice)
+t('scale: price value', pr?.value.toFixed(2), '45.99')
+t('scale: price type', pr?.valueType, 'price')
+
+t('scale: wrong prefix is not a scale label', parseScaleBarcode('3012340012500', scaleWeight), null)
+t('scale: wrong length is not a scale label', parseScaleBarcode('201234001250', scaleWeight), null)
+t('scale: non-numeric is not a scale label', parseScaleBarcode('2012A40012500', scaleWeight), null)
+t('scale: disabled scheme never parses', parseScaleBarcode('2012340012500', { ...scaleWeight, enabled: false }), null)
+
+// 4006381333931 is a valid EAN-13; flipping the last digit breaks the check.
+t('scale: valid check digit passes', parseScaleBarcode('4006381333931', scaleCheck) !== null, true)
+t('scale: bad check digit rejected', parseScaleBarcode('4006381333930', scaleCheck), null)
 
 console.log(`\n${pass}/${pass + fail} passed`)
 if (fail > 0) process.exitCode = 1
