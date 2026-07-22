@@ -74,11 +74,28 @@ function renderLogo(shopName: string, logoUrl?: string | null): string {
   return `<span style="font-size:15px;font-weight:700;color:#ffffff;letter-spacing:0.01em;">${escapeHtml(shopName)}</span>`
 }
 
+// Row values carry user text — product names, customer names — and this shop
+// is Arabic, while the email's own chrome is English. Mixing the two in one
+// line hands the Unicode bidirectional algorithm an ambiguous run: with an LTR
+// paragraph direction it reorders "لحم بقرى بتلو 2kg" so the quantity and the
+// name visually swap, which reads as gibberish even though the string is
+// perfectly correct.
+//
+// `<bdi>` (bidi isolate) is the fix: it walls the value off from the
+// surrounding direction and picks its own base direction from its first strong
+// character — Arabic name → RTL, English name → LTR — so each row lays itself
+// out correctly with no per-language branching. `dir="auto"` and the explicit
+// `unicode-bidi` are belt and braces for mail clients that keep the element but
+// drop the user-agent stylesheet.
+export function isolate(value: string): string {
+  return `<bdi dir="auto" style="unicode-bidi:isolate;">${escapeHtml(value)}</bdi>`
+}
+
 function renderRows(rows: EmailRow[]): string {
   const cells = rows.map(row => `
         <tr>
-          <td style="padding:7px 0;font-size:13px;color:${MUTED};white-space:nowrap;vertical-align:top;">${escapeHtml(row.label)}</td>
-          <td style="padding:7px 0 7px 16px;font-size:14px;color:${INK};font-weight:600;text-align:right;">${escapeHtml(row.value)}</td>
+          <td style="padding:7px 0;font-size:13px;color:${MUTED};white-space:nowrap;vertical-align:top;">${isolate(row.label)}</td>
+          <td dir="auto" style="padding:7px 0 7px 16px;font-size:14px;color:${INK};font-weight:600;text-align:right;">${isolate(row.value)}</td>
         </tr>`).join('')
   return `
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0;border-top:1px solid ${HAIRLINE};border-bottom:1px solid ${HAIRLINE};">

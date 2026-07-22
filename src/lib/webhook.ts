@@ -37,7 +37,7 @@
 // downstream error. `items` (the array) is kept too, for any future
 // consumer that wants the structured form.
 import { getOrCreateSettings } from './shopSettings.js'
-import { renderEmailShell, escapeHtml, type EmailRow } from './emailTemplate.js'
+import { renderEmailShell, escapeHtml, isolate, type EmailRow } from './emailTemplate.js'
 
 export type WebhookEvent =
   | { type: 'order.created', orderId: string, orderNumber: number | null, customer: string | null, totalAmount: string, items: Array<{ itemName: string, kg: string }>, itemsSummary: string }
@@ -127,7 +127,10 @@ function enrichEvent(event: WebhookEvent, shopName: string, logoUrl: string | nu
     const bodyHtml = renderEmailShell({
       shopName, logoUrl,
       title: 'Low stock alert',
-      introHtml: `<strong>${escapeHtml(event.name)}</strong> has dropped to or below its alert threshold.`,
+      // isolate(), not escapeHtml(): the product name is Arabic in this shop
+      // and the sentence around it is English — without a bidi isolate the two
+      // runs reorder into nonsense. isolate() escapes internally.
+      introHtml: `<strong>${isolate(event.name)}</strong> has dropped to or below its alert threshold.`,
       rows
     })
     return { subject, bodyText, bodyHtml }
