@@ -24,17 +24,21 @@ const INITIAL_TOTAL = 0
 // v3.4 — the flat delivery fee, resolved at the moment an order is priced.
 //
 // Charged only when the shop has it switched on AND this order is actually a
-// delivery, which is exactly "it has a delivery address" — the same signal the
-// receipt already uses to decide whether to print one. A counter sale never
-// picks it up.
+// delivery. A counter sale never picks it up.
 //
 // Read from settings per order rather than cached: the amount is a shop policy
 // that an admin can change mid-day, and the order being priced right now should
 // use what's configured right now. Whatever it resolves to is then stored on
 // the order, so a later change to the setting can't restate what a past
 // customer paid.
-async function deliveryFeeFor(deliveryAddress: string | undefined): Promise<number> {
-  if (deliveryAddress === undefined || deliveryAddress.trim() === '') return INITIAL_TOTAL
+async function deliveryFeeFor(deliveryAddress: string | undefined, isDelivery: boolean | undefined): Promise<number> {
+  // Either signal counts. `isDelivery` is the cashier saying so outright (the
+  // New Order screen's toggle); a non-empty address covers every other path
+  // that never had a flag — the Inbox, and orders created before this field
+  // existed. Requiring the address alone was the original bug.
+  const flagged = isDelivery === true
+  const addressed = deliveryAddress !== undefined && deliveryAddress.trim() !== ''
+  if (!flagged && !addressed) return INITIAL_TOTAL
   const settings = await getOrCreateSettings()
   if (!settings.deliveryFeeEnabled) return INITIAL_TOTAL
   return Number(settings.deliveryFee)
@@ -98,6 +102,14 @@ const CreateOrderSchema = z.object({
   // other source.
   deliveryAddress: z.string().optional(),
   deliveryName: z.string().optional(),
+  // v3.4 fix — an explicit "this is a delivery" flag.
+  //
+  // The delivery fee originally keyed off `deliveryAddress` being non-empty,
+  // on the assumption that a delivery always has one typed in. It doesn't: a
+  // phone order for a known customer, or one whose address lives on their
+  // Customer record, leaves this blank — and those orders silently got no fee.
+  // The cashier's intent is the thing to act on, so the form now states it.
+  isDelivery: z.boolean().optional(),
   // v3 replan (Phase K — cash management). Defaults to "cash" so every
   // pre-v3 order-creation call (no body change required) still gets a
   // correct value.
@@ -191,7 +203,7 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
   }
 
   const { data } = parsed
-  const { customer, customerId, customerMessage, deliveryAddress, paymentMethod, source, items } = data
+  const { customer, customerId, customerMessage, deliveryAddress, isDelivery, paymentMethod, source, items } = data
   // The zod schema leaves `source` optional; the DB column defaults it to
   // "cashier" for us, but the cash-ledger category string is built in JS
   // before that default is visible on any object we hold, so resolve it
@@ -235,7 +247,7 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
     const p = getProduct(it.productId)
     return sum + Number(p.pricePerKg) * it.kg
   }, INITIAL_TOTAL)
-  const deliveryFee = await deliveryFeeFor(deliveryAddress)
+  const deliveryFee = await deliveryFeeFor(deliveryAddress, isDelivery)
   const total = itemsTotal + deliveryFee
 
   const order = await prisma.$transaction(async (tx) => {
@@ -343,7 +355,7 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
     return
   }
   const { data } = parsed
-  const { customer, customerId, customerMessage, deliveryAddress, paymentMethod, source, items } = data
+  const { customer, customerId, customerMessage, deliveryAddress, isDelivery, paymentMethod, source, items } = data
 
   const productIds = items.map((i) => i.productId)
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
@@ -385,7 +397,7 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
   // The draft carries the fee too, so the total the cashier reads off the card
   // is the total the customer will pay. Promotion keeps this figure rather than
   // repricing, so the fee crosses over unchanged.
-  const deliveryFee = await deliveryFeeFor(deliveryAddress)
+  const deliveryFee = await deliveryFeeFor(deliveryAddress, isDelivery)
   const total = itemsTotal + deliveryFee
 
   const draft = await prisma.$transaction(async (tx) => {
