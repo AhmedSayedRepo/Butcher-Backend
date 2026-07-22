@@ -316,6 +316,13 @@ model ShopSettings {
   // out — "Driver", "Courier", "Delivery", a name in Arabic. Only a display
   // label; the per-order value lives on Order.deliveryName.
   deliveryNameLabel String @default("Delivery")
+  // v3.4 — a flat delivery fee, off by default. When enabled it's added to the
+  // total of any order that has a delivery address, and printed as its own line
+  // on the receipt. The amount lives here, but each order stores the fee it was
+  // actually charged (Order.deliveryFee) so changing this never rewrites what a
+  // past customer paid.
+  deliveryFeeEnabled Boolean @default(false)
+  deliveryFee        Decimal @default(0) @db.Decimal(10,2)
   // The shop's own contact details, printed on the receipt when the toggles
   // above are on. They had no home before this — the app knew the shop's
   // name only as a hardcoded UI string.
@@ -466,6 +473,11 @@ model Order {
 
   // v3 replan (Phase I.3 — phone delivery orders). Null for every other source.
   deliveryAddress String?  @db.Text
+  // v3.4 — the delivery fee charged on THIS order, snapshotted at the moment
+  // it was priced. Included in `totalAmount`; kept separately so the receipt
+  // can show it on its own line and so editing the shop-wide fee later can't
+  // silently restate an old order's total.
+  deliveryFee     Decimal  @default(0) @db.Decimal(10,2)
   // v3 replan (Phase K — cash management): which payment rail this order
   // used. Free-text default "cash" rather than a DB enum, matching how
   // `source` is already modeled — extending the set of understood values

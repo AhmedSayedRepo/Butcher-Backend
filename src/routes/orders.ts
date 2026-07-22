@@ -20,6 +20,25 @@ const router = Router()
 
 const MIN_ORDER_ITEMS = 1
 const INITIAL_TOTAL = 0
+
+// v3.4 — the flat delivery fee, resolved at the moment an order is priced.
+//
+// Charged only when the shop has it switched on AND this order is actually a
+// delivery, which is exactly "it has a delivery address" — the same signal the
+// receipt already uses to decide whether to print one. A counter sale never
+// picks it up.
+//
+// Read from settings per order rather than cached: the amount is a shop policy
+// that an admin can change mid-day, and the order being priced right now should
+// use what's configured right now. Whatever it resolves to is then stored on
+// the order, so a later change to the setting can't restate what a past
+// customer paid.
+async function deliveryFeeFor(deliveryAddress: string | undefined): Promise<number> {
+  if (deliveryAddress === undefined || deliveryAddress.trim() === '') return INITIAL_TOTAL
+  const settings = await getOrCreateSettings()
+  if (!settings.deliveryFeeEnabled) return INITIAL_TOTAL
+  return Number(settings.deliveryFee)
+}
 const UNMATCHED_ITEM_PRICE = 0
 
 // v3 replan (Phase I — omnichannel intake). Extends the set of `source`
@@ -212,10 +231,12 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
     }
   }
 
-  const total = items.reduce((sum, it) => {
+  const itemsTotal = items.reduce((sum, it) => {
     const p = getProduct(it.productId)
     return sum + Number(p.pricePerKg) * it.kg
   }, INITIAL_TOTAL)
+  const deliveryFee = await deliveryFeeFor(deliveryAddress)
+  const total = itemsTotal + deliveryFee
 
   const order = await prisma.$transaction(async (tx) => {
     // v3.1 replan (Phase L — daily order numbering, ADR-015): a
@@ -237,6 +258,7 @@ router.post('/', auth, requireCap('create_orders'), asyncHandler<AuthRequest>(as
         // confirm an ON_THE_WAY order and move it to COMPLETED.
         receiptCode: generateReceiptCode(),
         totalAmount: total,
+        deliveryFee,
         userId: user.id
       }
     })
@@ -327,17 +349,44 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
   const products = await prisma.product.findMany({ where: { id: { in: productIds } } })
   const productMap = new Map(products.map((p) => [p.id, p]))
 
+  // v3.4 — drafts are now stock-checked at save time, like the direct-create
+  // path above.
+  //
+  // Previously they weren't, on the reasoning that a draft "hasn't happened
+  // yet" and promotion re-checks anyway. That's true of the *data* but wrong
+  // for the person: a cashier builds a draft in front of the customer, and
+  // learning at promote time that there was never enough lamb means the
+  // conversation already happened. Failing here says it while it can still be
+  // acted on.
+  //
+  // This only affects drafts created through this route — the counter and the
+  // Inbox. WhatsApp orders are written directly by the webhook and are
+  // deliberately left alone: an inbound customer request must always be
+  // recorded, even for stock the shop doesn't have. That's the shop's
+  // decision to make on the draft, not a reason to drop the message.
   for (const it of items) {
-    if (!productMap.has(it.productId)) {
+    const p = productMap.get(it.productId)
+    if (p === undefined) {
       res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.PRODUCT_NOT_FOUND, `Product not found: ${it.productId}`, { id: it.productId }))
+      return
+    }
+    if (Number(p.stockKg) < it.kg) {
+      res.status(HTTP_STATUS.BAD_REQUEST).json({
+        ...apiError(ERROR_CODES.INSUFFICIENT_STOCK, `Insufficient stock for ${p.name}. Available: ${p.stockKg.toString()} kg`, { name: p.name, available: p.stockKg.toString() })
+      })
       return
     }
   }
 
-  const total = items.reduce((sum, it) => {
+  const itemsTotal = items.reduce((sum, it) => {
     const p = productMap.get(it.productId)
     return sum + (p === undefined ? UNMATCHED_ITEM_PRICE : Number(p.pricePerKg) * it.kg)
   }, INITIAL_TOTAL)
+  // The draft carries the fee too, so the total the cashier reads off the card
+  // is the total the customer will pay. Promotion keeps this figure rather than
+  // repricing, so the fee crosses over unchanged.
+  const deliveryFee = await deliveryFeeFor(deliveryAddress)
+  const total = itemsTotal + deliveryFee
 
   const draft = await prisma.$transaction(async (tx) => {
     // Drafts get a daily number too (Phase L, ADR-015) — they're already
@@ -354,6 +403,7 @@ router.post('/draft', auth, requireCap('create_orders'), asyncHandler<AuthReques
         source,
         dailyNumber,
         totalAmount: total,
+        deliveryFee,
         userId: user.id,
         status: OrderStatus.DRAFT
       }

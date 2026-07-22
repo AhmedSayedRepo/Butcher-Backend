@@ -127,6 +127,10 @@ const UpdateShopSettingsSchema = z.object({
   shopAddress: z.string().max(MAX_RECEIPT_TEXT_LENGTH).nullable().optional(),
   // v3.1 follow-up 10b — display label only; the value is per-order.
   deliveryNameLabel: z.string().min(MIN_SHOP_NAME_LENGTH).max(MAX_RECEIPT_TEXT_LENGTH).optional(),
+  // v3.4 — flat delivery fee. Non-negative rather than positive: zero with the
+  // toggle on is a legitimate "deliveries are free right now".
+  deliveryFeeEnabled: z.boolean().optional(),
+  deliveryFee: z.number().nonnegative().optional(),
   // v3.3 — the whole scale-barcode scheme, validated as one object. Turning
   // the feature off is `enabled: false` inside the config, not clearing it, so
   // this never needs to write a JSON null (which Prisma handles specially).
