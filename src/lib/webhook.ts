@@ -195,17 +195,20 @@ function enrichEvent(event: WebhookEvent, shopName: string, logoUrl: string | nu
 // try/catch so a settings-read failure degrades to unbranded copy rather than
 // dropping the webhook — the raw fields the automation may already depend on
 // must go out regardless.
-async function getBrand(): Promise<{ shopName: string, logoUrl: string | null }> {
+async function getBrand(): Promise<{ shopName: string, logoUrl: string | null, notifyEmail: string }> {
   try {
     const settings = await getOrCreateSettings()
     return {
       // `shopName` has a non-empty schema default, so no fallback is needed —
       // the earlier `!== '' ? … : ''` was just the identity on a string.
       shopName: settings.shopName,
-      logoUrl: settings.appLogoUrl ?? settings.receiptLogoUrl ?? null
+      logoUrl: settings.appLogoUrl ?? settings.receiptLogoUrl ?? null,
+      // '' rather than null so it stays a stable string field for Make's mapper;
+      // the scenario treats empty as "use the fallback recipient".
+      notifyEmail: settings.notifyEmail ?? ''
     }
   } catch {
-    return { shopName: '', logoUrl: null }
+    return { shopName: '', logoUrl: null, notifyEmail: '' }
   }
 }
 
@@ -217,7 +220,7 @@ export async function fireWebhook(event: WebhookEvent): Promise<void> {
   if (url === undefined || url === '') return
 
   try {
-    const { shopName, logoUrl } = await getBrand()
+    const { shopName, logoUrl, notifyEmail } = await getBrand()
     const enrichment = enrichEvent(event, shopName, logoUrl)
     await fetch(url, {
       method: 'POST',
@@ -226,6 +229,9 @@ export async function fireWebhook(event: WebhookEvent): Promise<void> {
         ...event,
         ...enrichment,
         shopName,
+        // v3.5 — which shop's inbox this belongs to. The Make scenario maps the
+        // order email's recipient from it, so one scenario serves every org.
+        notifyEmail,
         firedAt: new Date().toISOString()
       })
     })

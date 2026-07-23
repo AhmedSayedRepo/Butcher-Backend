@@ -131,11 +131,37 @@ const UpdateShopSettingsSchema = z.object({
   // toggle on is a legitimate "deliveries are free right now".
   deliveryFeeEnabled: z.boolean().optional(),
   deliveryFee: z.number().nonnegative().optional(),
+  // v3.5 — per-shop notification recipient. Plain string (not .email()) so ''
+  // can clear it, same convention as brevoSenderEmail; the PATCH handler maps
+  // '' → null below.
+  notifyEmail: z.string().optional(),
   // v3.3 — the whole scale-barcode scheme, validated as one object. Turning
   // the feature off is `enabled: false` inside the config, not clearing it, so
   // this never needs to write a JSON null (which Prisma handles specially).
   scaleBarcodeConfig: ScaleBarcodeConfigSchema.optional()
 })
+
+type UpdateShopSettingsInput = z.infer<typeof UpdateShopSettingsSchema>
+
+// Builds the Prisma update object from the validated body. Extracted from the
+// handler purely to keep its cyclomatic complexity under the lint threshold:
+// the four fields that need special mapping (three that treat '' as "clear",
+// one JSON blob) are all branchy, and stacking them in the route pushed it
+// over. `''` → null is the shared convention that lets a field be cleared
+// distinctly from being left untouched (omitted key).
+function toShopSettingsUpdate(data: UpdateShopSettingsInput): Prisma.ShopSettingsUpdateInput {
+  const { brevoSenderEmail, brevoApiKey, scaleBarcodeConfig, notifyEmail, ...rest } = data
+  return {
+    ...rest,
+    ...(brevoSenderEmail === undefined ? {} : { brevoSenderEmail: brevoSenderEmail === '' ? null : brevoSenderEmail }),
+    ...(brevoApiKey === undefined ? {} : { brevoApiKeyEncrypted: brevoApiKey === '' ? null : encryptSecret(brevoApiKey) }),
+    // Now that the return type is annotated, Prisma accepts the validated
+    // config object directly — the InputJsonValue assertion that was needed
+    // when this was inlined is redundant here.
+    ...(scaleBarcodeConfig === undefined ? {} : { scaleBarcodeConfig }),
+    ...(notifyEmail === undefined ? {} : { notifyEmail: notifyEmail === '' ? null : notifyEmail })
+  }
+}
 
 router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
   const parsed = UpdateShopSettingsSchema.safeParse(req.body)
@@ -143,11 +169,9 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
     res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(ERROR_CODES.VALIDATION_FAILED, 'Validation failed', undefined, parsed.error.flatten()))
     return
   }
-  const current = await getOrCreateSettings()
   const { data } = parsed
-  const { brevoSenderEmail, brevoApiKey, scaleBarcodeConfig, ...rest } = data
 
-  if (brevoApiKey !== undefined && brevoApiKey !== '' && !isEncryptionConfigured()) {
+  if (data.brevoApiKey !== undefined && data.brevoApiKey !== '' && !isEncryptionConfigured()) {
     res.status(HTTP_STATUS.BAD_REQUEST).json(apiError(
       ERROR_CODES.ENCRYPTION_KEY_MISSING,
       'SETTINGS_ENCRYPTION_KEY is not configured on the server, so a Brevo API key can\'t be saved here yet. Ask whoever deploys this app to set that env var, or continue using BREVO_API_KEY as an env var for now.'
@@ -155,17 +179,10 @@ router.patch('/', auth, requireRole('admin'), asyncHandler(async (req, res) => {
     return
   }
 
+  const current = await getOrCreateSettings()
   const updated = await prisma.shopSettings.update({
     where: { id: current.id },
-    data: {
-      ...rest,
-      ...(brevoSenderEmail === undefined ? {} : { brevoSenderEmail: brevoSenderEmail === '' ? null : brevoSenderEmail }),
-      ...(brevoApiKey === undefined ? {} : { brevoApiKeyEncrypted: brevoApiKey === '' ? null : encryptSecret(brevoApiKey) }),
-      // A validated config object is a plain JSON structure; the assertion is
-      // only to satisfy Prisma's `InputJsonValue`, which a named object type
-      // doesn't structurally match without an index signature.
-      ...(scaleBarcodeConfig === undefined ? {} : { scaleBarcodeConfig: scaleBarcodeConfig as Prisma.InputJsonValue })
-    }
+    data: toShopSettingsUpdate(data)
   })
   res.json(toClientSettings(updated))
 }))

@@ -335,6 +335,11 @@ model ShopSettings {
   // nullable column means the migration is a single additive ALTER. Null =
   // scale barcodes not configured (the default).
   scaleBarcodeConfig  Json?
+  // v3.5 — where this shop's order/stock notifications are emailed. Per-org,
+  // so each shop's alerts reach its own inbox rather than a single shared one.
+  // Rides along in the webhook payload as `notifyEmail`; the Make scenario maps
+  // the order email's recipient from it. Null → the automation's own fallback.
+  notifyEmail         String?
   // Multi-tenancy phase 1 — nullable for now, see the Organization model.
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id])
